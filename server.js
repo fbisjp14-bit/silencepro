@@ -175,10 +175,16 @@ const INDEX_HTML = `<!DOCTYPE html>
                         <p class="text-sm font-mono text-green-400 bg-green-400/10 px-2 py-1 rounded inline-block mt-1" id="result-stats">Calculando redução...</p>
                     </div>
                     
-                    <a id="download-btn" href="#" download="audio_viral_limpo.mp3" class="w-full sm:w-auto px-8 py-4 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 rounded-xl font-black text-lg flex items-center justify-center gap-2 transition-all transform hover:scale-105 shadow-lg cursor-pointer">
-                        <i data-lucide="download" class="w-6 h-6"></i>
-                        BAIXAR MP3
-                    </a>
+                    <div class="w-full sm:w-auto flex flex-col sm:flex-row gap-3">
+                        <a id="download-btn" href="#" download="audio_viral_limpo.mp3" class="w-full sm:w-auto px-6 py-4 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 rounded-xl font-black text-base flex items-center justify-center gap-2 transition-all transform hover:scale-105 shadow-lg cursor-pointer">
+                            <i data-lucide="download" class="w-5 h-5"></i>
+                            BAIXAR MP3
+                        </a>
+                        <a id="download-video-btn" href="#" download="video_cortado.mp4" class="hidden w-full sm:w-auto px-6 py-4 bg-green-600 hover:bg-green-500 active:bg-green-700 rounded-xl font-black text-base items-center justify-center gap-2 transition-all transform hover:scale-105 shadow-lg cursor-pointer">
+                            <i data-lucide="download" class="w-5 h-5"></i>
+                            BAIXAR MP4
+                        </a>
+                    </div>
                 </div>
                 <div class="mt-6 pt-4 border-t border-gray-700">
                     <audio id="audio-preview" controls class="w-full rounded-lg bg-gray-800"></audio>
@@ -216,6 +222,7 @@ const INDEX_HTML = `<!DOCTYPE html>
         const resultPanel = document.getElementById('result-panel');
         const resultStats = document.getElementById('result-stats');
         const downloadBtn = document.getElementById('download-btn');
+        const downloadVideoBtn = document.getElementById('download-video-btn');
         const audioPreview = document.getElementById('audio-preview');
         const videoPreview = document.getElementById('video-preview');
 
@@ -331,6 +338,8 @@ const INDEX_HTML = `<!DOCTYPE html>
             audioPreview.classList.remove('hidden');
             videoPreview.classList.add('hidden');
             videoPreview.removeAttribute('src');
+            downloadVideoBtn.classList.add('hidden');
+            downloadVideoBtn.classList.remove('flex');
 
             try {
                 log('A ligar o motor de áudio...', 'info');
@@ -503,7 +512,7 @@ const INDEX_HTML = `<!DOCTYPE html>
 
         async function processVideoMP4() {
             log('A enviar vídeo para o servidor FFmpeg...', 'warn');
-            log('Agora o corte de vídeo não roda mais no navegador do celular. Quem corta é o servidor.', 'info');
+            log('Fluxo novo: primeiro gera MP3 limpo, depois corta o MP4 por cenas.', 'info');
 
             const formData = new FormData();
             formData.append('file', currentFile);
@@ -519,7 +528,7 @@ const INDEX_HTML = `<!DOCTYPE html>
                     body: formData
                 });
             } catch (e) {
-                throw new Error('A conexão com o servidor caiu durante o envio/processamento. Aguarde 20 segundos e tente de novo com MP4 curto em 720p.');
+                throw new Error('A conexão com o servidor caiu durante o envio/processamento. Aguarde 20 segundos e tente novamente.');
             }
 
             if (!response.ok) {
@@ -533,33 +542,37 @@ const INDEX_HTML = `<!DOCTYPE html>
                 throw new Error(msg);
             }
 
-            const blob = await response.blob();
-            if (!blob || blob.size < 1024) {
-                throw new Error('O servidor retornou um vídeo vazio. Tente outro MP4 ou use corte menos agressivo.');
-            }
+            const data = await response.json();
+            if (!data || !data.mp3Url || !data.mp4Url) throw new Error('O servidor não entregou os links finais.');
 
-            const url = URL.createObjectURL(blob);
-            downloadBtn.href = url;
-            downloadBtn.download = \`SilencePro_\${currentFile.name.replace(/\\.[^/.]+$/, '')}.mp4\`;
-            downloadBtn.innerHTML = '<i data-lucide="download" class="w-6 h-6"></i> BAIXAR MP4';
-            audioPreview.classList.add('hidden');
-            audioPreview.removeAttribute('src');
-            videoPreview.src = url;
+            downloadBtn.href = data.mp3Url;
+            downloadBtn.download = data.mp3Name || ('SilencePro_' + currentFile.name.replace(/\.[^/.]+$/, '') + '_audio_limpo.mp3');
+            downloadBtn.innerHTML = '<i data-lucide="download" class="w-5 h-5"></i> BAIXAR MP3 LIMPO';
+            downloadBtn.classList.remove('hidden');
+
+            downloadVideoBtn.href = data.mp4Url;
+            downloadVideoBtn.download = data.mp4Name || ('SilencePro_' + currentFile.name.replace(/\.[^/.]+$/, '') + '_video_cortado.mp4');
+            downloadVideoBtn.innerHTML = '<i data-lucide="download" class="w-5 h-5"></i> BAIXAR MP4 CORTADO';
+            downloadVideoBtn.classList.remove('hidden');
+            downloadVideoBtn.classList.add('flex');
+
+            audioPreview.src = data.mp3Url;
+            audioPreview.classList.remove('hidden');
+            videoPreview.src = data.mp4Url;
             videoPreview.classList.remove('hidden');
 
-            let statsText = 'MP4 pronto para baixar.';
-            const rawStats = response.headers.get('X-SilencePro-Stats');
-            if (rawStats) {
-                try {
-                    const stats = JSON.parse(decodeURIComponent(rawStats));
-                    const percent = Math.round((1 - (stats.final / stats.original)) * 100);
-                    statsText = \`Original: \${stats.original.toFixed(1)}s | Limpo: \${stats.final.toFixed(1)}s | Cenas: \${stats.scenes} | Redução: \${percent}%\`;
-                } catch (_) {}
+            let statsText = 'MP3 limpo + MP4 cortado prontos para baixar.';
+            if (data.stats) {
+                const st = data.stats;
+                const pctAudio = st.audioFinal && st.original ? Math.max(0, Math.round((1 - st.audioFinal / st.original) * 100)) : 0;
+                const pctVideo = st.videoFinal && st.original ? Math.max(0, Math.round((1 - st.videoFinal / st.original) * 100)) : 0;
+                statsText = 'Original: ' + st.original.toFixed(1) + 's | MP3: ' + st.audioFinal.toFixed(1) + 's (-' + pctAudio + '%) | MP4: ' + st.videoFinal.toFixed(1) + 's (-' + pctVideo + '%) | Cenas: ' + st.scenes;
             }
             resultStats.textContent = statsText;
-            document.querySelector('#result-panel h3').innerHTML = '<i data-lucide="party-popper" class="w-6 h-6"></i> MP4 Pronto a Usar!';
+            document.querySelector('#result-panel h3').innerHTML = '<i data-lucide="party-popper" class="w-6 h-6"></i> MP3 + MP4 Prontos!';
             lucide.createIcons();
-            log('MP4 pronto para baixar!', 'success');
+            log('MP3 limpo pronto para baixar!', 'success');
+            log('MP4 cortado pronto para baixar!', 'success');
         }
 
     </script>
@@ -739,12 +752,149 @@ async function cutByReencode(input, regions, output) {
   ]);
 }
 
+
+const RESULTS_ROOT = path.join(os.tmpdir(), 'silencepro_results');
+fs.mkdirSync(RESULTS_ROOT, { recursive: true });
+
+function makeJobId() {
+  return Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+}
+
+function publicBase(req) {
+  return `${req.protocol}://${req.get('host')}`;
+}
+
+function audioModeDuration(requested, mode) {
+  // Áudio pode ser mais agressivo porque não pesa como vídeo.
+  if (mode === 'extremo') return Math.max(0.06, Math.min(requested, 0.14));
+  if (mode === 'natural') return Math.max(0.16, Math.min(requested, 0.35));
+  return Math.max(0.10, Math.min(requested, 0.22));
+}
+
+function videoModeDuration(requested, mode) {
+  // Vídeo corta mais que antes, mas sem tentar microcortes absurdos.
+  if (mode === 'extremo') return Math.max(0.16, requested);
+  if (mode === 'natural') return Math.max(0.35, requested);
+  return Math.max(0.24, requested);
+}
+
+function mergeRegionsFlexible(regions, opts = {}) {
+  const minScene = opts.minScene ?? 0.35;
+  const mergeGap = opts.mergeGap ?? 0.18;
+  const maxScenes = opts.maxScenes ?? 60;
+  const merged = [];
+  for (const r of regions) {
+    if (!Number.isFinite(r.start) || !Number.isFinite(r.end) || r.end - r.start < 0.08) continue;
+    const last = merged[merged.length - 1];
+    if (!last) { merged.push({ ...r }); continue; }
+    const gap = r.start - last.end;
+    const small = (last.end - last.start) < minScene || (r.end - r.start) < minScene;
+    if (gap <= mergeGap || small) last.end = Math.max(last.end, r.end);
+    else merged.push({ ...r });
+  }
+  let out = merged.filter(r => r.end - r.start > 0.12);
+  if (out.length > maxScenes) out = reduceRegionsToMax(out, maxScenes);
+  return out;
+}
+
+function regionsForMode(duration, silences, padding, mode, kind) {
+  let regions = buildKeepRegions(duration, silences, padding);
+  if (!regions.length) return [{ start: 0, end: duration }];
+  if (kind === 'audio') {
+    const opts = mode === 'extremo'
+      ? { minScene: 0.18, mergeGap: 0.08, maxScenes: 220 }
+      : mode === 'natural'
+        ? { minScene: 0.35, mergeGap: 0.16, maxScenes: 160 }
+        : { minScene: 0.25, mergeGap: 0.10, maxScenes: 200 };
+    return mergeRegionsFlexible(regions, opts);
+  }
+  const opts = mode === 'extremo'
+    ? { minScene: 0.35, mergeGap: 0.20, maxScenes: 80 }
+    : mode === 'natural'
+      ? { minScene: 0.65, mergeGap: 0.45, maxScenes: 45 }
+      : { minScene: 0.45, mergeGap: 0.30, maxScenes: 65 };
+  return mergeRegionsFlexible(regions, opts);
+}
+
+function audioConcatFilter(regions) {
+  const parts = [];
+  const labels = [];
+  regions.forEach((r, i) => {
+    parts.push(`[0:a]atrim=start=${r.start.toFixed(3)}:end=${r.end.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`);
+    labels.push(`[a${i}]`);
+  });
+  parts.push(`${labels.join('')}concat=n=${regions.length}:v=0:a=1[aout]`);
+  return parts.join(';');
+}
+
+async function extractCleanMp3ByRegions(input, regions, output) {
+  if (!regions.length) throw new Error('Nenhuma região de áudio encontrada.');
+  if (regions.length === 1 && regions[0].start <= 0.05) {
+    // Mesmo sem muito corte, entrega MP3 separado.
+    await run('ffmpeg', ['-y', '-hide_banner', '-i', input, '-vn', '-ac', '1', '-ar', '44100', '-codec:a', 'libmp3lame', '-b:a', '128k', output]);
+    return;
+  }
+  const filter = audioConcatFilter(regions);
+  try {
+    await run('ffmpeg', ['-y', '-hide_banner', '-i', input, '-filter_complex', filter, '-map', '[aout]', '-ac', '1', '-ar', '44100', '-codec:a', 'libmp3lame', '-b:a', '128k', output]);
+  } catch (err) {
+    // Fallback leve: silenceremove direto no áudio.
+    await run('ffmpeg', ['-y', '-hide_banner', '-i', input, '-vn', '-af', 'silenceremove=start_periods=1:start_duration=0.08:start_threshold=-35dB:stop_periods=-1:stop_duration=0.12:stop_threshold=-35dB', '-ac', '1', '-ar', '44100', '-codec:a', 'libmp3lame', '-b:a', '128k', output]);
+  }
+}
+
+async function makeVideoCut(input, regions, tmpDir, output) {
+  const total = regions.reduce((a, r) => a + (r.end - r.start), 0);
+  let duration = 0;
+  try { duration = await getDuration(input); } catch (_) {}
+  const noRealCut = duration && (duration - total < 0.35);
+  if (noRealCut || !regions.length) {
+    await copyWholeVideo(input, output);
+    return [{ start: 0, end: duration || total }];
+  }
+  try {
+    await cutByStreamCopy(input, regions, tmpDir, output);
+    return regions;
+  } catch (err) {
+    const safer = reduceRegionsToMax(regions, 24);
+    try {
+      await cutByStreamCopy(input, safer, tmpDir, output);
+      return safer;
+    } catch (err2) {
+      const safer2 = reduceRegionsToMax(regions, 10);
+      try {
+        await cutByReencode(input, safer2, output);
+        return safer2;
+      } catch (err3) {
+        await copyWholeVideo(input, output);
+        return [{ start: 0, end: duration || total }];
+      }
+    }
+  }
+}
+
+app.get('/download/:job/:file', async (req, res) => {
+  const job = String(req.params.job || '').replace(/[^a-zA-Z0-9_\-]/g, '');
+  const fileKey = req.params.file === 'mp4' ? 'mp4' : 'mp3';
+  const filePath = path.join(RESULTS_ROOT, job, fileKey === 'mp4' ? 'video_cortado.mp4' : 'audio_limpo.mp3');
+  const exists = await fsp.stat(filePath).catch(() => null);
+  if (!exists) return res.status(404).send('Arquivo expirou ou não foi encontrado. Processe novamente.');
+  res.setHeader('Content-Type', fileKey === 'mp4' ? 'video/mp4' : 'audio/mpeg');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileKey === 'mp4' ? 'video_cortado.mp4' : 'audio_limpo.mp3'}"`);
+  fs.createReadStream(filePath).pipe(res);
+});
+
 app.post('/api/process', upload.single('file'), async (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'silencepro_job_'));
+  const jobId = makeJobId();
+  const resultDir = path.join(RESULTS_ROOT, jobId);
+  await fsp.mkdir(resultDir, { recursive: true });
+
   const input = path.join(tmpDir, 'input');
-  const output = path.join(tmpDir, 'saida.mp4');
+  const mp3Out = path.join(resultDir, 'audio_limpo.mp3');
+  const mp4Out = path.join(resultDir, 'video_cortado.mp4');
   try {
     await fsp.rename(file.path, input);
 
@@ -752,44 +902,56 @@ app.post('/api/process', upload.single('file'), async (req, res) => {
     const requestedDurationSilence = clampNumber(req.body.duration, 0.01, 3, 0.3);
     const padding = clampNumber(req.body.padding, 0, 0.5, 0.05);
     const mode = String(req.body.mode || 'viral');
-
     const duration = await getDuration(input);
 
-    const durationSilence = Math.max(requestedDurationSilence, mode === 'extremo' ? 0.22 : mode === 'natural' ? 0.35 : 0.28);
-    const detect = await run('ffmpeg', ['-hide_banner', '-i', input, '-af', `silencedetect=noise=${threshold}dB:d=${durationSilence}`, '-f', 'null', '-']);
-    const silences = parseSilences(detect.stderr);
-    let regions = mergeRegions(buildKeepRegions(duration, silences, padding), mode);
-    if (!regions.length) regions = [{ start: 0, end: duration }];
+    // 1) Detecta silêncio para MP3 limpo, mais agressivo.
+    const audioDurSilence = audioModeDuration(requestedDurationSilence, mode);
+    const audioDetect = await run('ffmpeg', ['-hide_banner', '-i', input, '-af', `silencedetect=noise=${threshold}dB:d=${audioDurSilence}`, '-f', 'null', '-']);
+    const audioSilences = parseSilences(audioDetect.stderr);
+    let audioRegions = regionsForMode(duration, audioSilences, Math.min(padding, 0.06), mode, 'audio');
+    if (!audioRegions.length) audioRegions = [{ start: 0, end: duration }];
 
-    regions = reduceRegionsToMax(regions, mode === 'natural' ? 6 : 8);
+    // 2) Gera MP3 separado.
+    await extractCleanMp3ByRegions(input, audioRegions, mp3Out);
+    let audioFinal = audioRegions.reduce((a, r) => a + (r.end - r.start), 0);
+    try { audioFinal = await getDuration(mp3Out); } catch (_) {}
 
-    const realCutSeconds = duration - regions.reduce((a, r) => a + (r.end - r.start), 0);
-    const noRealCut = realCutSeconds < 0.35 || (regions.length === 1 && regions[0].start <= 0.05 && regions[0].end >= duration - 0.05);
+    // 3) Detecta silêncio para vídeo com regra própria, mais segura mas menos frouxa que antes.
+    const videoDurSilence = videoModeDuration(requestedDurationSilence, mode);
+    const videoDetect = await run('ffmpeg', ['-hide_banner', '-i', input, '-af', `silencedetect=noise=${threshold}dB:d=${videoDurSilence}`, '-f', 'null', '-']);
+    const videoSilences = parseSilences(videoDetect.stderr);
+    let videoRegions = regionsForMode(duration, videoSilences, padding, mode, 'video');
+    if (!videoRegions.length) videoRegions = [{ start: 0, end: duration }];
 
-    if (noRealCut) {
-      await copyWholeVideo(input, output);
-    } else {
-      try {
-        await cutByStreamCopy(input, regions, tmpDir, output);
-      } catch (copyErr) {
-        regions = reduceRegionsToMax(regions, 4);
-        try {
-          await cutByReencode(input, regions, output);
-        } catch (encodeErr) {
-          await copyWholeVideo(input, output);
-          regions = [{ start: 0, end: duration }];
-        }
-      }
-    }
+    // 4) Corta MP4 separado.
+    videoRegions = await makeVideoCut(input, videoRegions, tmpDir, mp4Out);
+    let videoFinal = videoRegions.reduce((a, r) => a + (r.end - r.start), 0);
+    try { videoFinal = await getDuration(mp4Out); } catch (_) {}
 
-    const newDur = regions.reduce((a, r) => a + (r.end - r.start), 0);
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', `attachment; filename="SilencePro_${safeName(req.file.originalname)}.mp4"`);
-    res.setHeader('X-SilencePro-Stats', encodeURIComponent(JSON.stringify({ original: duration, final: newDur, scenes: regions.length, silences: silences.length })));
-    fs.createReadStream(output).pipe(res);
-    res.on('finish', async () => { await fsp.rm(tmpDir, { recursive: true, force: true }); });
-  } catch (err) {
+    // limpa job temp agora; resultados ficam por tempo limitado para download.
     await fsp.rm(tmpDir, { recursive: true, force: true });
+    setTimeout(() => fsp.rm(resultDir, { recursive: true, force: true }).catch(() => {}), 45 * 60 * 1000);
+
+    const base = publicBase(req);
+    res.json({
+      ok: true,
+      mp3Url: `${base}/download/${jobId}/mp3`,
+      mp4Url: `${base}/download/${jobId}/mp4`,
+      mp3Name: `SilencePro_${safeName(req.file.originalname)}_audio_limpo.mp3`,
+      mp4Name: `SilencePro_${safeName(req.file.originalname)}_video_cortado.mp4`,
+      stats: {
+        original: duration,
+        audioFinal,
+        videoFinal,
+        scenes: videoRegions.length,
+        audioBlocks: audioRegions.length,
+        audioSilences: audioSilences.length,
+        videoSilences: videoSilences.length
+      }
+    });
+  } catch (err) {
+    await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    await fsp.rm(resultDir, { recursive: true, force: true }).catch(() => {});
     if (file && file.path) await fsp.rm(file.path, { force: true }).catch(() => {});
     res.status(500).json({ error: err.message || 'Erro ao processar vídeo.' });
   }
