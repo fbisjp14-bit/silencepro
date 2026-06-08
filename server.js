@@ -344,24 +344,26 @@ const INDEX_HTML = `<!DOCTYPE html>
                 const ext = currentFile.name.includes('.') ? currentFile.name.substring(currentFile.name.lastIndexOf('.')).toLowerCase() : '';
                 const isVideo = currentFile.type.startsWith('video/') || ['.mp4', '.mov', '.webm', '.mkv'].includes(ext);
 
-                log(isVideo ? 'A ler o áudio interno do vídeo...' : 'A extrair a onda sonora do arquivo...', 'info');
-                const arrayBuffer = await currentFile.arrayBuffer();
-
-                log('A mapear decibéis...', 'info');
-                const buffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-                const sampleRate = buffer.sampleRate;
-                const channelData = buffer.getChannelData(0);
-
-                const thresholdDB = parseFloat(thresholdInput.value);
-                const minSilenceSec = parseFloat(durationInput.value);
-                const paddingSec = parseFloat(paddingInput.value);
-
-                const keepRegions = detectKeepRegions(channelData, sampleRate, thresholdDB, minSilenceSec, paddingSec);
-                log(\`Foram preservados \${keepRegions.length} blocos vitais de fala.\`, 'success');
-
                 if (isVideo) {
-                    await processVideoMP4(arrayBuffer, keepRegions, sampleRate);
+                    // Para vídeo, NÃO decodifica no navegador do celular. Isso pesava e podia travar.
+                    // O servidor Render faz toda a análise e o corte com FFmpeg.
+                    log('Vídeo detectado. O áudio e os cortes serão analisados no servidor.', 'info');
+                    await processVideoMP4();
                 } else {
+                    log('A extrair a onda sonora do arquivo...', 'info');
+                    const arrayBuffer = await currentFile.arrayBuffer();
+
+                    log('A mapear decibéis...', 'info');
+                    const buffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+                    const sampleRate = buffer.sampleRate;
+                    const channelData = buffer.getChannelData(0);
+
+                    const thresholdDB = parseFloat(thresholdInput.value);
+                    const minSilenceSec = parseFloat(durationInput.value);
+                    const paddingSec = parseFloat(paddingInput.value);
+
+                    const keepRegions = detectKeepRegions(channelData, sampleRate, thresholdDB, minSilenceSec, paddingSec);
+                    log('Foram preservados ' + keepRegions.length + ' blocos vitais de fala.', 'success');
                     await processAudioMP3(channelData, sampleRate, keepRegions);
                 }
 
@@ -499,7 +501,7 @@ const INDEX_HTML = `<!DOCTYPE html>
             log('MP3 pronto!', 'success');
         }
 
-        async function processVideoMP4(arrayBuffer, keepRegions, sampleRate) {
+        async function processVideoMP4() {
             log('A enviar vídeo para o servidor FFmpeg...', 'warn');
             log('Agora o corte de vídeo não roda mais no navegador do celular. Quem corta é o servidor.', 'info');
 
@@ -517,7 +519,7 @@ const INDEX_HTML = `<!DOCTYPE html>
                     body: formData
                 });
             } catch (e) {
-                throw new Error('Servidor de vídeo não encontrado. Esta versão precisa estar no Render/Railway com backend Node + FFmpeg, não no Cloudflare Pages puro.');
+                throw new Error('A conexão com o servidor caiu durante o envio/processamento. Aguarde 20 segundos e tente de novo com MP4 curto em 720p.');
             }
 
             if (!response.ok) {
@@ -565,6 +567,7 @@ const INDEX_HTML = `<!DOCTYPE html>
 </html>
 `;
 app.get('/', (req, res) => res.type('html').send(INDEX_HTML));
+app.get('/api/health', (req, res) => res.json({ ok: true, service: 'Silence Pro', ffmpeg: true }));
 
 
 
@@ -682,6 +685,60 @@ function safeName(name) {
   return String(name || 'video').replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/\.[^.]+$/, '');
 }
 
+
+function clampNumber(n, min, max, fallback) {
+  n = Number(n);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+async function copyWholeVideo(input, output) {
+  try {
+    await run('ffmpeg', ['-y', '-hide_banner', '-i', input, '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-movflags', '+faststart', output]);
+  } catch (_) {
+    await run('ffmpeg', ['-y', '-hide_banner', '-i', input, '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '34', '-threads', '1', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', output]);
+  }
+}
+
+async function cutByStreamCopy(input, regions, tmpDir, output) {
+  const listPath = path.join(tmpDir, 'concat.txt');
+  const segmentPaths = [];
+  for (let i = 0; i < regions.length; i++) {
+    const r = regions[i];
+    const seg = path.join(tmpDir, `seg_${String(i).padStart(3, '0')}.mp4`);
+    const dur = Math.max(0.15, r.end - r.start);
+    await run('ffmpeg', [
+      '-y', '-hide_banner',
+      '-ss', r.start.toFixed(3),
+      '-i', input,
+      '-t', dur.toFixed(3),
+      '-map', '0:v:0', '-map', '0:a:0?',
+      '-c', 'copy',
+      '-avoid_negative_ts', 'make_zero',
+      '-movflags', '+faststart',
+      seg
+    ]);
+    const st = await fsp.stat(seg).catch(() => null);
+    if (st && st.size > 1024) segmentPaths.push(seg);
+  }
+  if (!segmentPaths.length) throw new Error('Não foi possível criar segmentos do vídeo.');
+  await fsp.writeFile(listPath, segmentPaths.map(p => `file '${p.replace(/'/g, "'\\''")}'`).join('\n'));
+  await run('ffmpeg', ['-y', '-hide_banner', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-movflags', '+faststart', output]);
+}
+
+async function cutByReencode(input, regions, output) {
+  const filter = ffmpegFilter(regions);
+  await run('ffmpeg', [
+    '-y', '-hide_banner', '-i', input,
+    '-filter_complex', filter,
+    '-map', '[v]', '-map', '[a]',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '36', '-threads', '1',
+    '-c:a', 'aac', '-b:a', '96k',
+    '-movflags', '+faststart',
+    output
+  ]);
+}
+
 app.post('/api/process', upload.single('file'), async (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
@@ -690,55 +747,42 @@ app.post('/api/process', upload.single('file'), async (req, res) => {
   const output = path.join(tmpDir, 'saida.mp4');
   try {
     await fsp.rename(file.path, input);
-    const threshold = Number(req.body.threshold || -35);
-    const requestedDurationSilence = Number(req.body.duration || 0.3);
-    const padding = Number(req.body.padding || 0.05);
+
+    const threshold = clampNumber(req.body.threshold, -80, -10, -35);
+    const requestedDurationSilence = clampNumber(req.body.duration, 0.01, 3, 0.3);
+    const padding = clampNumber(req.body.padding, 0, 0.5, 0.05);
     const mode = String(req.body.mode || 'viral');
 
     const duration = await getDuration(input);
 
-    // Para vídeo, 0.10s gera centenas de microcortes e derruba o Render Free.
-    // Mantém a aparência do site, mas protege o processamento por trás.
-    const durationSilence = Math.max(requestedDurationSilence, mode === 'extremo' ? 0.18 : 0.25);
+    const durationSilence = Math.max(requestedDurationSilence, mode === 'extremo' ? 0.22 : mode === 'natural' ? 0.35 : 0.28);
     const detect = await run('ffmpeg', ['-hide_banner', '-i', input, '-af', `silencedetect=noise=${threshold}dB:d=${durationSilence}`, '-f', 'null', '-']);
     const silences = parseSilences(detect.stderr);
     let regions = mergeRegions(buildKeepRegions(duration, silences, padding), mode);
     if (!regions.length) regions = [{ start: 0, end: duration }];
 
-    let noRealCut = regions.length === 1 && regions[0].start <= 0.05 && regions[0].end >= duration - 0.05;
+    regions = reduceRegionsToMax(regions, mode === 'natural' ? 6 : 8);
+
+    const realCutSeconds = duration - regions.reduce((a, r) => a + (r.end - r.start), 0);
+    const noRealCut = realCutSeconds < 0.35 || (regions.length === 1 && regions[0].start <= 0.05 && regions[0].end >= duration - 0.05);
 
     if (noRealCut) {
-      // Não derruba mais com erro. Entrega o MP4 mesmo assim, para o usuário conseguir baixar.
-      try {
-        await run('ffmpeg', ['-y', '-hide_banner', '-i', input, '-c', 'copy', '-movflags', '+faststart', output]);
-      } catch (_) {
-        await run('ffmpeg', ['-y', '-hide_banner', '-i', input, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30', '-threads', '1', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', output]);
-      }
+      await copyWholeVideo(input, output);
     } else {
-      // Tentativa 1: corta com poucas cenas otimizadas.
-      async function encodeWithRegions(list, crf = '30') {
-        const filter = ffmpegFilter(list);
-        await run('ffmpeg', [
-          '-y', '-hide_banner', '-i', input,
-          '-filter_complex', filter,
-          '-map', '[v]', '-map', '[a]',
-          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', crf, '-threads', '1',
-          '-c:a', 'aac', '-b:a', '128k',
-          '-movflags', '+faststart',
-          output
-        ]);
-      }
-
       try {
-        await encodeWithRegions(regions, '30');
-      } catch (firstErr) {
-        // Tentativa 2: se o Render Free não aguentar, reduz ainda mais as cenas e tenta novamente.
-        regions = reduceRegionsToMax(regions, 8);
-        await encodeWithRegions(regions, '32');
+        await cutByStreamCopy(input, regions, tmpDir, output);
+      } catch (copyErr) {
+        regions = reduceRegionsToMax(regions, 4);
+        try {
+          await cutByReencode(input, regions, output);
+        } catch (encodeErr) {
+          await copyWholeVideo(input, output);
+          regions = [{ start: 0, end: duration }];
+        }
       }
     }
 
-    const newDur = noRealCut ? duration : regions.reduce((a, r) => a + (r.end - r.start), 0);
+    const newDur = regions.reduce((a, r) => a + (r.end - r.start), 0);
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="SilencePro_${safeName(req.file.originalname)}.mp4"`);
     res.setHeader('X-SilencePro-Stats', encodeURIComponent(JSON.stringify({ original: duration, final: newDur, scenes: regions.length, silences: silences.length })));
@@ -750,5 +794,6 @@ app.post('/api/process', upload.single('file'), async (req, res) => {
     res.status(500).json({ error: err.message || 'Erro ao processar vídeo.' });
   }
 });
+
 
 app.listen(PORT, () => console.log(`Silence Pro rodando na porta ${PORT}`));
