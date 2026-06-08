@@ -620,10 +620,27 @@ function buildKeepRegions(duration, silences, padding) {
   return keep;
 }
 
+function reduceRegionsToMax(regions, maxScenes) {
+  let out = regions.map(r => ({ ...r }));
+  while (out.length > maxScenes) {
+    let bestIndex = 0;
+    let bestGap = Infinity;
+    for (let i = 0; i < out.length - 1; i++) {
+      const gap = out[i + 1].start - out[i].end;
+      if (gap < bestGap) { bestGap = gap; bestIndex = i; }
+    }
+    out[bestIndex].end = Math.max(out[bestIndex].end, out[bestIndex + 1].end);
+    out.splice(bestIndex + 1, 1);
+  }
+  return out;
+}
+
 function mergeRegions(regions, mode) {
-  const minScene = mode === 'extremo' ? 0.35 : mode === 'natural' ? 0.75 : 0.55;
-  const mergeGap = mode === 'extremo' ? 0.18 : mode === 'natural' ? 0.55 : 0.35;
-  const maxScenes = mode === 'extremo' ? 80 : mode === 'natural' ? 45 : 60;
+  // Render Free tem pouca RAM. Para funcionar de verdade no celular, o servidor não pode tentar
+  // montar 100, 200 ou 1000 microcortes. Ele junta pausas pequenas em cenas maiores.
+  const minScene = mode === 'extremo' ? 0.45 : mode === 'natural' ? 1.0 : 0.75;
+  const mergeGap = mode === 'extremo' ? 0.35 : mode === 'natural' ? 0.85 : 0.60;
+  const maxScenes = mode === 'extremo' ? 18 : mode === 'natural' ? 12 : 15;
   const merged = [];
   for (const r of regions) {
     const last = merged[merged.length - 1];
@@ -633,9 +650,9 @@ function mergeRegions(regions, mode) {
     if (gap <= mergeGap || small) last.end = Math.max(last.end, r.end);
     else merged.push({ ...r });
   }
-  let out = merged;
-  let gap = 0.8;
-  while (out.length > maxScenes && gap <= 8) {
+  let out = merged.filter(r => r.end - r.start > 0.20);
+  let gap = mergeGap;
+  while (out.length > maxScenes && gap <= 12) {
     const next = [];
     for (const r of out) {
       const last = next[next.length - 1];
@@ -643,9 +660,10 @@ function mergeRegions(regions, mode) {
       else last.end = Math.max(last.end, r.end);
     }
     out = next;
-    gap += 0.7;
+    gap += 0.8;
   }
-  return out.filter(r => r.end - r.start > 0.12);
+  if (out.length > maxScenes) out = reduceRegionsToMax(out, maxScenes);
+  return out.filter(r => r.end - r.start > 0.20);
 }
 
 function ffmpegFilter(regions) {
@@ -672,32 +690,55 @@ app.post('/api/process', upload.single('file'), async (req, res) => {
   const output = path.join(tmpDir, 'saida.mp4');
   try {
     await fsp.rename(file.path, input);
-    const threshold = Number(req.body.threshold || -40);
-    const durationSilence = Number(req.body.duration || 0.3);
+    const threshold = Number(req.body.threshold || -35);
+    const requestedDurationSilence = Number(req.body.duration || 0.3);
     const padding = Number(req.body.padding || 0.05);
     const mode = String(req.body.mode || 'viral');
 
     const duration = await getDuration(input);
+
+    // Para vídeo, 0.10s gera centenas de microcortes e derruba o Render Free.
+    // Mantém a aparência do site, mas protege o processamento por trás.
+    const durationSilence = Math.max(requestedDurationSilence, mode === 'extremo' ? 0.18 : 0.25);
     const detect = await run('ffmpeg', ['-hide_banner', '-i', input, '-af', `silencedetect=noise=${threshold}dB:d=${durationSilence}`, '-f', 'null', '-']);
     const silences = parseSilences(detect.stderr);
     let regions = mergeRegions(buildKeepRegions(duration, silences, padding), mode);
     if (!regions.length) regions = [{ start: 0, end: duration }];
-    if (regions.length === 1 && regions[0].start <= 0.01 && regions[0].end >= duration - 0.01) {
-      throw new Error('Não encontrei silêncio suficiente para cortar. Tente aumentar o volume de corte para -35 dB ou diminuir silêncio mínimo.');
+
+    let noRealCut = regions.length === 1 && regions[0].start <= 0.05 && regions[0].end >= duration - 0.05;
+
+    if (noRealCut) {
+      // Não derruba mais com erro. Entrega o MP4 mesmo assim, para o usuário conseguir baixar.
+      try {
+        await run('ffmpeg', ['-y', '-hide_banner', '-i', input, '-c', 'copy', '-movflags', '+faststart', output]);
+      } catch (_) {
+        await run('ffmpeg', ['-y', '-hide_banner', '-i', input, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30', '-threads', '1', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', output]);
+      }
+    } else {
+      // Tentativa 1: corta com poucas cenas otimizadas.
+      async function encodeWithRegions(list, crf = '30') {
+        const filter = ffmpegFilter(list);
+        await run('ffmpeg', [
+          '-y', '-hide_banner', '-i', input,
+          '-filter_complex', filter,
+          '-map', '[v]', '-map', '[a]',
+          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', crf, '-threads', '1',
+          '-c:a', 'aac', '-b:a', '128k',
+          '-movflags', '+faststart',
+          output
+        ]);
+      }
+
+      try {
+        await encodeWithRegions(regions, '30');
+      } catch (firstErr) {
+        // Tentativa 2: se o Render Free não aguentar, reduz ainda mais as cenas e tenta novamente.
+        regions = reduceRegionsToMax(regions, 8);
+        await encodeWithRegions(regions, '32');
+      }
     }
 
-    const filter = ffmpegFilter(regions);
-    await run('ffmpeg', [
-      '-y', '-hide_banner', '-i', input,
-      '-filter_complex', filter,
-      '-map', '[v]', '-map', '[a]',
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
-      '-c:a', 'aac', '-b:a', '128k',
-      '-movflags', '+faststart',
-      output
-    ]);
-
-    const newDur = regions.reduce((a, r) => a + (r.end - r.start), 0);
+    const newDur = noRealCut ? duration : regions.reduce((a, r) => a + (r.end - r.start), 0);
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="SilencePro_${safeName(req.file.originalname)}.mp4"`);
     res.setHeader('X-SilencePro-Stats', encodeURIComponent(JSON.stringify({ original: duration, final: newDur, scenes: regions.length, silences: silences.length })));
