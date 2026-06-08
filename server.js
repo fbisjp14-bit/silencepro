@@ -561,7 +561,7 @@ const INDEX_HTML = `<!DOCTYPE html>
             videoPreview.src = data.mp4Url;
             videoPreview.classList.remove('hidden');
 
-            let statsText = 'MP3 limpo + MP4 cortado prontos para baixar.';
+            let statsText = 'MP3 limpo + MP4 cortado nos mesmos pontos prontos para baixar.';
             if (data.stats) {
                 const st = data.stats;
                 const pctAudio = st.audioFinal && st.original ? Math.max(0, Math.round((1 - st.audioFinal / st.original) * 100)) : 0;
@@ -572,7 +572,7 @@ const INDEX_HTML = `<!DOCTYPE html>
             document.querySelector('#result-panel h3').innerHTML = '<i data-lucide="party-popper" class="w-6 h-6"></i> MP3 + MP4 Prontos!';
             lucide.createIcons();
             log('MP3 limpo pronto para baixar!', 'success');
-            log('MP4 cortado pronto para baixar!', 'success');
+            log('MP4 cortado pronto para baixar! Se ele vier sem áudio, use o MP3 limpo no CapCut.', 'success');
         }
 
     </script>
@@ -714,19 +714,23 @@ async function copyWholeVideo(input, output) {
 }
 
 async function cutByStreamCopy(input, regions, tmpDir, output) {
+  // Esta versão corta SOMENTE A IMAGEM do vídeo e remove o áudio do MP4.
+  // O áudio final separado é o MP3 limpo. Isso deixa o processamento muito mais leve
+  // e evita falhas do Render Free ao tentar cortar vídeo + áudio juntos.
   const listPath = path.join(tmpDir, 'concat.txt');
   const segmentPaths = [];
   for (let i = 0; i < regions.length; i++) {
     const r = regions[i];
     const seg = path.join(tmpDir, `seg_${String(i).padStart(3, '0')}.mp4`);
-    const dur = Math.max(0.15, r.end - r.start);
+    const dur = Math.max(0.12, r.end - r.start);
     await run('ffmpeg', [
       '-y', '-hide_banner',
       '-ss', r.start.toFixed(3),
       '-i', input,
       '-t', dur.toFixed(3),
-      '-map', '0:v:0', '-map', '0:a:0?',
-      '-c', 'copy',
+      '-map', '0:v:0',
+      '-an',
+      '-c:v', 'copy',
       '-avoid_negative_ts', 'make_zero',
       '-movflags', '+faststart',
       seg
@@ -735,18 +739,30 @@ async function cutByStreamCopy(input, regions, tmpDir, output) {
     if (st && st.size > 1024) segmentPaths.push(seg);
   }
   if (!segmentPaths.length) throw new Error('Não foi possível criar segmentos do vídeo.');
-  await fsp.writeFile(listPath, segmentPaths.map(p => `file '${p.replace(/'/g, "'\\''")}'`).join('\n'));
-  await run('ffmpeg', ['-y', '-hide_banner', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-movflags', '+faststart', output]);
+  await fsp.writeFile(listPath, segmentPaths.map(p => `file '${p.replace(/'/g, "'\''")}'`).join('\n'));
+  await run('ffmpeg', ['-y', '-hide_banner', '-f', 'concat', '-safe', '0', '-i', listPath, '-c:v', 'copy', '-an', '-movflags', '+faststart', output]);
+}
+
+function ffmpegVideoOnlyFilter(regions) {
+  const parts = [];
+  const labels = [];
+  regions.forEach((r, i) => {
+    parts.push(`[0:v]trim=start=${r.start.toFixed(3)}:end=${r.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`);
+    labels.push(`[v${i}]`);
+  });
+  parts.push(`${labels.join('')}concat=n=${regions.length}:v=1:a=0[v]`);
+  return parts.join(';');
 }
 
 async function cutByReencode(input, regions, output) {
-  const filter = ffmpegFilter(regions);
+  // Fallback: reencoda apenas a imagem, sem áudio, para ficar mais leve.
+  const filter = ffmpegVideoOnlyFilter(regions);
   await run('ffmpeg', [
     '-y', '-hide_banner', '-i', input,
     '-filter_complex', filter,
-    '-map', '[v]', '-map', '[a]',
+    '-map', '[v]',
+    '-an',
     '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '36', '-threads', '1',
-    '-c:a', 'aac', '-b:a', '96k',
     '-movflags', '+faststart',
     output
   ]);
@@ -816,6 +832,20 @@ function regionsForMode(duration, silences, padding, mode, kind) {
   return mergeRegionsFlexible(regions, opts);
 }
 
+function prepareVideoRegionsFromAudio(audioRegions, duration, mode) {
+  // O MP4 agora usa os MESMOS PONTOS do MP3 limpo.
+  // Para não derrubar o Render Free em vídeo longo, só junta cortes muito pequenos.
+  const maxScenes = duration > 600 ? 90 : duration > 240 ? 110 : 140;
+  const opts = mode === 'extremo'
+    ? { minScene: 0.16, mergeGap: 0.05, maxScenes }
+    : mode === 'natural'
+      ? { minScene: 0.28, mergeGap: 0.12, maxScenes: Math.min(maxScenes, 100) }
+      : { minScene: 0.20, mergeGap: 0.08, maxScenes };
+  let regions = mergeRegionsFlexible(audioRegions, opts);
+  if (!regions.length) regions = [{ start: 0, end: duration }];
+  return regions;
+}
+
 function audioConcatFilter(regions) {
   const parts = [];
   const labels = [];
@@ -866,8 +896,7 @@ async function makeVideoCut(input, regions, tmpDir, output) {
         await cutByReencode(input, safer2, output);
         return safer2;
       } catch (err3) {
-        await copyWholeVideo(input, output);
-        return [{ start: 0, end: duration || total }];
+        throw new Error('O servidor não conseguiu cortar o MP4. Tente vídeo menor, 720p, ou aumente o silêncio mínimo para 0.15s.');
       }
     }
   }
@@ -916,14 +945,11 @@ app.post('/api/process', upload.single('file'), async (req, res) => {
     let audioFinal = audioRegions.reduce((a, r) => a + (r.end - r.start), 0);
     try { audioFinal = await getDuration(mp3Out); } catch (_) {}
 
-    // 3) Detecta silêncio para vídeo com regra própria, mais segura mas menos frouxa que antes.
-    const videoDurSilence = videoModeDuration(requestedDurationSilence, mode);
-    const videoDetect = await run('ffmpeg', ['-hide_banner', '-i', input, '-af', `silencedetect=noise=${threshold}dB:d=${videoDurSilence}`, '-f', 'null', '-']);
-    const videoSilences = parseSilences(videoDetect.stderr);
-    let videoRegions = regionsForMode(duration, videoSilences, padding, mode, 'video');
-    if (!videoRegions.length) videoRegions = [{ start: 0, end: duration }];
+    // 3) O MP4 usa os MESMOS PONTOS do MP3 limpo.
+    // Assim o vídeo também perde os silêncios e fica fácil juntar o MP3 no CapCut.
+    let videoRegions = prepareVideoRegionsFromAudio(audioRegions, duration, mode);
 
-    // 4) Corta MP4 separado.
+    // 4) Corta MP4 separado. O MP4 sai sem áudio para ficar leve; use o MP3 limpo por cima no CapCut.
     videoRegions = await makeVideoCut(input, videoRegions, tmpDir, mp4Out);
     let videoFinal = videoRegions.reduce((a, r) => a + (r.end - r.start), 0);
     try { videoFinal = await getDuration(mp4Out); } catch (_) {}
@@ -946,7 +972,7 @@ app.post('/api/process', upload.single('file'), async (req, res) => {
         scenes: videoRegions.length,
         audioBlocks: audioRegions.length,
         audioSilences: audioSilences.length,
-        videoSilences: videoSilences.length
+        videoSilences: audioSilences.length
       }
     });
   } catch (err) {
