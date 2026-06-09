@@ -14,10 +14,8 @@ const UPLOAD_DIR = path.join(ROOT_TMP, 'uploads');
 const OUTPUT_DIR = path.join(ROOT_TMP, 'outputs');
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 500);
 const FFMPEG_PRESET = process.env.FFMPEG_PRESET || 'ultrafast';
-const FFMPEG_CRF = process.env.FFMPEG_CRF || '20';
-// DESLIGADO por padrão: o modo copy/concat é muito rápido, mas em alguns celulares/arquivos
-// pode causar repetição de fala perto dos cortes (efeito gago/DJ) por causa de keyframes.
-// O padrão agora é corte preciso com reencode ultrafast para manter sincronia limpa.
+const FFMPEG_CRF = process.env.FFMPEG_CRF || '23';
+// Desligado por padrão para evitar bug de repetição/gagueira causado por cortes sem reencode em keyframes.
 const FAST_COPY_MODE = String(process.env.FAST_COPY_MODE || '0') === '1';
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -179,17 +177,40 @@ async function renderCopyConcat(inputPath, outputPath, cuts, duration) {
   }
 }
 
-async function renderPreciseSelect(inputPath, outputPath, cuts) {
-  const expr = buildDropExpression(cuts);
-  const filter = `[0:v]select='${expr}',setpts=N/FRAME_RATE/TB[v];[0:a]aselect='${expr}',asetpts=N/SR/TB[a]`;
-  await run('ffmpeg', [
-    '-hide_banner', '-y', '-nostdin', '-fflags', '+genpts', '-i', inputPath,
-    '-filter_complex', filter,
-    '-map', '[v]', '-map', '[a]',
-    '-c:v', 'libx264', '-preset', FFMPEG_PRESET, '-crf', FFMPEG_CRF,
-    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k',
-    '-movflags', '+faststart', '-threads', '0', '-max_muxing_queue_size', '1024', outputPath
-  ]);
+async function renderPreciseSelect(inputPath, outputPath, cuts, duration) {
+  // ANTI-GAGO / ANTI-DJ:
+  // O bug de falas repetindo vinha do concat por cópia rápida em pontos que não eram keyframes.
+  // Aqui o vídeo é montado com trim/atrim + concat dentro do FFmpeg, com timestamps zerados
+  // a cada trecho. Isso evita repetição, frame fantasma, áudio pulando e descompasso.
+  const keep = buildKeepRanges(duration, cuts);
+  if (!keep.length) throw new Error('O corte ficou agressivo demais e removeria todo o vídeo.');
+
+  const filterPath = path.join(ROOT_TMP, crypto.randomUUID() + '-anti-gago.filter');
+  let filter = '';
+  for (let i = 0; i < keep.length; i++) {
+    const r = keep[i];
+    const start = Math.max(0, r.start).toFixed(3);
+    const end = Math.max(0, r.end).toFixed(3);
+    filter += `[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[v${i}];`;
+    filter += `[0:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[a${i}];`;
+  }
+  for (let i = 0; i < keep.length; i++) filter += `[v${i}][a${i}]`;
+  filter += `concat=n=${keep.length}:v=1:a=1[vcat][acat];`;
+  filter += `[acat]aresample=async=1:first_pts=0[a]`;
+
+  await fsp.writeFile(filterPath, filter, 'utf8');
+  try {
+    await run('ffmpeg', [
+      '-hide_banner', '-y', '-nostdin', '-i', inputPath,
+      '-filter_complex_script', filterPath,
+      '-map', '[vcat]', '-map', '[a]',
+      '-c:v', 'libx264', '-preset', FFMPEG_PRESET, '-crf', FFMPEG_CRF,
+      '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k',
+      '-movflags', '+faststart', '-max_muxing_queue_size', '1024', '-threads', '0', outputPath
+    ]);
+  } finally {
+    fsp.unlink(filterPath).catch(() => {});
+  }
 }
 
 async function renderWithCuts(inputPath, outputPath, cuts, duration) {
@@ -218,8 +239,8 @@ async function renderWithCuts(inputPath, outputPath, cuts, duration) {
     }
   }
 
-  await renderPreciseSelect(inputPath, outputPath, cuts);
-  return { mode: 'precise-select' };
+  await renderPreciseSelect(inputPath, outputPath, cuts, duration);
+  return { mode: 'precise-anti-gago' };
 }
 
 function cleanOldFiles() {
@@ -266,13 +287,15 @@ app.post('/process', upload.single('video'), async (req, res) => {
     outputPath = path.join(OUTPUT_DIR, outputName);
     const renderResult = await renderWithCuts(inputPath, outputPath, cuts, info.duration);
 
-    const reductionPercent = Math.max(0, Math.round((1 - finalSeconds / info.duration) * 100));
+    const outInfo = await probe(outputPath).catch(() => null);
+    const realFinalSeconds = outInfo && outInfo.duration ? outInfo.duration : finalSeconds;
+    const reductionPercent = Math.max(0, Math.round((1 - realFinalSeconds / info.duration) * 100));
     res.json({
       ok: true,
       fileName: outputName,
       downloadUrl: '/download/' + encodeURIComponent(outputName),
       originalSeconds: info.duration.toFixed(1),
-      finalSeconds: finalSeconds.toFixed(1),
+      finalSeconds: realFinalSeconds.toFixed(1),
       reductionPercent,
       silenceCount: detected.silences.length + (detected.openSilenceStart !== null ? 1 : 0),
       cutCount: cuts.length,
