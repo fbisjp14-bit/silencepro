@@ -6,8 +6,8 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+COPY package*.json ./
+RUN npm ci --omit=dev || npm install --omit=dev
 
 COPY server.js README.md ./
 
@@ -18,4 +18,4 @@ ENV FFMPEG_CRF=20
 
 EXPOSE 10000
 
-CMD ["node", "server.js"]
+CMD ["npm", "start"]
