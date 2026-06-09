@@ -116,7 +116,7 @@ function buildCutRanges(duration, silences, openSilenceStart, paddingSec) {
 
   const merged = [];
   for (const c of cuts) {
-    if (!merged.length || c.start > merged[merged.length - 1].end + 0.015) merged.push({ ...c });
+    if (!merged.length || c.start > merged[merged.length - 1].end + 0.080) merged.push({ ...c });
     else merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, c.end);
   }
   return merged;
@@ -139,7 +139,9 @@ function buildKeepRanges(duration, cuts) {
     cursor = Math.max(cursor, end);
   }
   if (cursor < total - 0.02) keep.push({ start: cursor, end: total });
-  return keep.filter(r => r.end - r.start >= 0.025);
+  // Evita microtrechos de áudio entre cortes muito próximos.
+  // Esses pedaços minúsculos são os que mais geram chiado, estalo e sensação de erro no corte.
+  return keep.filter(r => r.end - r.start >= 0.090);
 }
 
 function quoteConcatPath(filePath) {
@@ -178,25 +180,34 @@ async function renderCopyConcat(inputPath, outputPath, cuts, duration) {
 }
 
 async function renderPreciseSelect(inputPath, outputPath, cuts, duration) {
-  // ANTI-GAGO / ANTI-DJ:
-  // O bug de falas repetindo vinha do concat por cópia rápida em pontos que não eram keyframes.
-  // Aqui o vídeo é montado com trim/atrim + concat dentro do FFmpeg, com timestamps zerados
-  // a cada trecho. Isso evita repetição, frame fantasma, áudio pulando e descompasso.
+  // ANTI-GAGO + ANTI-CHIADO:
+  // 1) Não usa corte por cópia em keyframes, para não repetir fala.
+  // 2) Usa trim/atrim com timestamps zerados.
+  // 3) Aplica micro fade-in/fade-out em cada emenda de áudio para matar estalos/chiados de corte.
+  // 4) Remove microtrechos curtos demais, que geralmente causam artefatos em narrações.
   const keep = buildKeepRanges(duration, cuts);
   if (!keep.length) throw new Error('O corte ficou agressivo demais e removeria todo o vídeo.');
 
-  const filterPath = path.join(ROOT_TMP, crypto.randomUUID() + '-anti-gago.filter');
+  const filterPath = path.join(ROOT_TMP, crypto.randomUUID() + '-anti-chiado.filter');
+  const AUDIO_FADE = Math.max(0.006, Math.min(0.018, Number(process.env.AUDIO_FADE_SEC || 0.012)));
   let filter = '';
   for (let i = 0; i < keep.length; i++) {
     const r = keep[i];
+    const segDur = Math.max(0, r.end - r.start);
     const start = Math.max(0, r.start).toFixed(3);
     const end = Math.max(0, r.end).toFixed(3);
+    const fade = Math.min(AUDIO_FADE, Math.max(0.003, segDur / 4));
+    const outStart = Math.max(0, segDur - fade).toFixed(3);
+    const fadeStr = fade.toFixed(3);
+
     filter += `[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[v${i}];`;
-    filter += `[0:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[a${i}];`;
+    filter += `[0:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS,`;
+    filter += `afade=t=in:st=0:d=${fadeStr},afade=t=out:st=${outStart}:d=${fadeStr},`;
+    filter += `aresample=async=1:first_pts=0[a${i}];`;
   }
   for (let i = 0; i < keep.length; i++) filter += `[v${i}][a${i}]`;
   filter += `concat=n=${keep.length}:v=1:a=1[vcat][acat];`;
-  filter += `[acat]aresample=async=1:first_pts=0[a]`;
+  filter += `[acat]aresample=async=1:first_pts=0,alimiter=limit=0.98[a]`;
 
   await fsp.writeFile(filterPath, filter, 'utf8');
   try {
@@ -205,8 +216,8 @@ async function renderPreciseSelect(inputPath, outputPath, cuts, duration) {
       '-filter_complex_script', filterPath,
       '-map', '[vcat]', '-map', '[a]',
       '-c:v', 'libx264', '-preset', FFMPEG_PRESET, '-crf', FFMPEG_CRF,
-      '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k',
-      '-movflags', '+faststart', '-max_muxing_queue_size', '1024', '-threads', '0', outputPath
+      '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000',
+      '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-threads', '0', outputPath
     ]);
   } finally {
     fsp.unlink(filterPath).catch(() => {});
@@ -240,7 +251,7 @@ async function renderWithCuts(inputPath, outputPath, cuts, duration) {
   }
 
   await renderPreciseSelect(inputPath, outputPath, cuts, duration);
-  return { mode: 'precise-anti-gago' };
+  return { mode: 'precise-anti-gago-anti-chiado' };
 }
 
 function cleanOldFiles() {
