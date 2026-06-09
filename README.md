@@ -44,3 +44,9 @@ README.md
 ## Observação
 
 Render grátis tem limite de CPU, memória e tempo. Para vídeos muito grandes, o processamento pode demorar ou falhar por limite do plano. Esta versão usa `ultrafast` para renderizar mais rápido.
+
+
+## Ajuste desta versão
+- Painel visual e textos principais mantidos como no arquivo original.
+- Processamento otimizado: detecção de silêncio em áudio mono 16 kHz e renderização por blocos preservados.
+- O resultado continua sendo MP4 único com áudio e vídeo juntos.
