@@ -1,15 +1,12 @@
-# Silence Pro - MP3 limpo + MP4 cortado
+# Silence Pro - Render/Railway
 
-Versão para Render/Railway com backend Node + FFmpeg.
+Versão com MP3 limpo + MP4 cortado usando o mesmo padrão de corte do removedor de MP3.
 
-Fluxo novo:
+Arquivos para enviar no GitHub:
 
-1. Envia vídeo MP4/MOV/WEBM/MKV.
-2. O servidor detecta silêncio pelo áudio.
-3. Gera um MP3 limpo separado, com corte mais agressivo.
-4. Gera um MP4 cortado separado, removendo cenas de silêncio/respiração com corte mais seguro.
-5. Entrega dois botões: Baixar MP3 limpo e Baixar MP4 cortado.
+- Dockerfile
+- package.json
+- server.js
+- README.md
 
-Deploy no Render:
-
-New -> Web Service -> conectar repositório -> Environment Docker -> Free -> Deploy.
+Depois no Render: Manual Deploy -> Deploy latest commit.

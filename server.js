@@ -512,7 +512,7 @@ const INDEX_HTML = `<!DOCTYPE html>
 
         async function processVideoMP4() {
             log('A enviar vídeo para o servidor FFmpeg...', 'warn');
-            log('Fluxo novo: primeiro gera MP3 limpo, depois corta o MP4 por cenas.', 'info');
+            log('Usando o mesmo padrão do MP3 para cortar também o MP4.', 'info');
 
             const formData = new FormData();
             formData.append('file', currentFile);
@@ -561,7 +561,7 @@ const INDEX_HTML = `<!DOCTYPE html>
             videoPreview.src = data.mp4Url;
             videoPreview.classList.remove('hidden');
 
-            let statsText = 'MP3 limpo + MP4 cortado nos mesmos pontos prontos para baixar.';
+            let statsText = 'MP3 limpo + MP4 cortado com o mesmo padrão de corte prontos para baixar.';
             if (data.stats) {
                 const st = data.stats;
                 const pctAudio = st.audioFinal && st.original ? Math.max(0, Math.round((1 - st.audioFinal / st.original) * 100)) : 0;
@@ -699,6 +699,124 @@ function safeName(name) {
 }
 
 
+
+function runBuffer(cmd, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { ...opts });
+    const chunks = [];
+    let stderr = '';
+    child.stdout.on('data', d => chunks.push(Buffer.from(d)));
+    child.stderr.on('data', d => { stderr += d.toString(); });
+    child.on('error', reject);
+    child.on('close', code => {
+      if (code === 0) resolve({ buffer: Buffer.concat(chunks), stderr });
+      else reject(new Error(`${cmd} saiu com código ${code}\n${stderr.slice(-3000)}`));
+    });
+  });
+}
+
+async function detectKeepRegionsPadraoMP3(input, thresholdDB, minSilenceSec, paddingSec) {
+  // Mesmo padrão do removedor de MP3: janela RMS de 10ms + threshold em dB + silêncio mínimo + margem.
+  // Isso evita o vídeo usar uma regra diferente do MP3.
+  const sampleRate = 44100;
+  const { buffer } = await runBuffer('ffmpeg', [
+    '-hide_banner', '-v', 'error', '-i', input,
+    '-vn', '-ac', '1', '-ar', String(sampleRate),
+    '-f', 's16le', 'pipe:1'
+  ]);
+
+  const totalSamples = Math.floor(buffer.length / 2);
+  if (totalSamples <= 0) throw new Error('Não foi possível extrair áudio do vídeo.');
+
+  const thresholdAmp = Math.pow(10, thresholdDB / 20);
+  const minSilenceSamples = Math.floor(minSilenceSec * sampleRate);
+  const paddingSamples = Math.floor(paddingSec * sampleRate);
+  const windowSize = Math.max(256, Math.floor(sampleRate * 0.01));
+
+  let isSilence = false;
+  let silenceStart = 0;
+  let currentKeepStart = 0;
+  const keepRegionsSamples = [];
+
+  for (let i = 0; i < totalSamples; i += windowSize) {
+    let sum = 0;
+    let count = 0;
+    const end = Math.min(totalSamples, i + windowSize);
+    for (let j = i; j < end; j++) {
+      const v = buffer.readInt16LE(j * 2) / 32768;
+      sum += v * v;
+      count++;
+    }
+    const rms = Math.sqrt(sum / Math.max(1, count));
+
+    if (rms < thresholdAmp) {
+      if (!isSilence) {
+        isSilence = true;
+        silenceStart = i;
+      }
+    } else {
+      if (isSilence) {
+        const silenceSamples = i - silenceStart;
+        if (silenceSamples >= minSilenceSamples) {
+          const startKeep = Math.max(0, currentKeepStart - paddingSamples);
+          const endKeep = Math.min(totalSamples, silenceStart + paddingSamples);
+          if (endKeep > startKeep) keepRegionsSamples.push({ start: startKeep, end: endKeep });
+          currentKeepStart = i;
+        }
+        isSilence = false;
+      }
+    }
+  }
+
+  const finalStart = Math.max(0, currentKeepStart - paddingSamples);
+  if (totalSamples > finalStart) keepRegionsSamples.push({ start: finalStart, end: totalSamples });
+
+  const mergedSamples = mergeSmallRegionsSamplesPadrao(keepRegionsSamples, sampleRate);
+  const duration = totalSamples / sampleRate;
+  const regions = mergedSamples.map(r => ({
+    start: Math.max(0, r.start / sampleRate),
+    end: Math.min(duration, r.end / sampleRate)
+  })).filter(r => r.end - r.start > 0.08);
+
+  return {
+    duration,
+    regions: regions.length ? regions : [{ start: 0, end: duration }],
+    rawBlocks: keepRegionsSamples.length
+  };
+}
+
+function mergeSmallRegionsSamplesPadrao(regions, sampleRate) {
+  if (!regions.length) return regions;
+  const minSegmentSamples = Math.floor(sampleRate * 0.55);
+  const mergeGapSamples = Math.floor(sampleRate * 0.35);
+  const merged = [];
+
+  for (const region of regions) {
+    const last = merged[merged.length - 1];
+    if (!last) {
+      merged.push({ ...region });
+      continue;
+    }
+    const gap = region.start - last.end;
+    const lastLen = last.end - last.start;
+    const thisLen = region.end - region.start;
+
+    if (gap <= mergeGapSamples || lastLen < minSegmentSamples || thisLen < minSegmentSamples) {
+      last.end = Math.max(last.end, region.end);
+    } else {
+      merged.push({ ...region });
+    }
+  }
+  return merged;
+}
+
+function limitVideoScenesPadrao(regions, duration) {
+  // Mantém o padrão do MP3. Só reduz se for cena demais para o Render Free não cair.
+  const maxScenes = duration > 900 ? 120 : duration > 600 ? 150 : duration > 240 ? 190 : 240;
+  if (regions.length <= maxScenes) return regions;
+  return reduceRegionsToMax(regions, maxScenes);
+}
+
 function clampNumber(n, min, max, fallback) {
   n = Number(n);
   if (!Number.isFinite(n)) return fallback;
@@ -832,6 +950,61 @@ function regionsForMode(duration, silences, padding, mode, kind) {
   return mergeRegionsFlexible(regions, opts);
 }
 
+
+
+async function detectSilencesAuto(input, duration, requestedThreshold, minSilenceSec, padding, mode) {
+  // Se o vídeo tiver ruído, música ou respiração, -30dB pode não detectar silêncio nenhum.
+  // Então esta função sobe o volume de corte automaticamente até encontrar pausas reais.
+  const base = Number(requestedThreshold);
+  const candidates = [];
+  for (const v of [base, -28, -25, -22, -20, -18, -16, -14, -12]) {
+    if (Number.isFinite(v) && v >= -80 && v <= -10 && !candidates.includes(v)) candidates.push(v);
+  }
+
+  const target = mode === 'extremo' ? 0.35 : mode === 'natural' ? 0.12 : 0.25;
+  const minWanted = Math.min(Math.max(duration * 0.04, 0.65), 12); // pelo menos alguma redução real
+  const maxSafeCut = duration * (mode === 'extremo' ? 0.60 : mode === 'natural' ? 0.35 : 0.50);
+  let best = null;
+
+  for (const th of candidates) {
+    let result;
+    try {
+      result = await run('ffmpeg', ['-hide_banner', '-i', input, '-af', `silencedetect=noise=${th}dB:d=${minSilenceSec}`, '-f', 'null', '-']);
+    } catch (e) {
+      continue;
+    }
+    const silences = parseSilences(result.stderr);
+    const regions = regionsForMode(duration, silences, Math.min(padding, 0.06), mode, 'audio');
+    const kept = regions.reduce((a, r) => a + Math.max(0, r.end - r.start), 0);
+    const cut = Math.max(0, duration - kept);
+    const ratio = cut / duration;
+
+    const item = { threshold: th, silences, regions, kept, cut, ratio };
+    if (!best) best = item;
+
+    // Pega o primeiro ponto que corta de verdade, mas sem destruir o vídeo.
+    if (cut >= minWanted && cut <= maxSafeCut) {
+      const currentScore = Math.abs(ratio - target);
+      const bestScore = Math.abs((best.ratio || 0) - target);
+      if (!best || currentScore < bestScore || best.cut < minWanted) best = item;
+      // Em viral/extremo, pode continuar um pouco para achar corte melhor; natural para cedo.
+      if (mode === 'natural' || ratio >= target * 0.75) break;
+    } else if (cut > 0 && cut < maxSafeCut) {
+      const currentScore = Math.abs(ratio - target);
+      const bestScore = Math.abs((best.ratio || 0) - target);
+      if (currentScore < bestScore) best = item;
+    }
+  }
+
+  if (!best) {
+    return { threshold: requestedThreshold, silences: [], regions: [{ start: 0, end: duration }], cut: 0, ratio: 0 };
+  }
+
+  // Se mesmo no automático não achou pausa, mantém inteiro, mas agora avisamos pelos stats.
+  if (!best.regions || !best.regions.length) best.regions = [{ start: 0, end: duration }];
+  return best;
+}
+
 function prepareVideoRegionsFromAudio(audioRegions, duration, mode) {
   // O MP4 agora usa os MESMOS PONTOS do MP3 limpo.
   // Para não derrubar o Render Free em vídeo longo, só junta cortes muito pequenos.
@@ -927,27 +1100,25 @@ app.post('/api/process', upload.single('file'), async (req, res) => {
   try {
     await fsp.rename(file.path, input);
 
-    const threshold = clampNumber(req.body.threshold, -80, -10, -35);
-    const requestedDurationSilence = clampNumber(req.body.duration, 0.01, 3, 0.3);
+    const threshold = clampNumber(req.body.threshold, -80, -10, -30);
+    const requestedDurationSilence = clampNumber(req.body.duration, 0.01, 3, 0.10);
     const padding = clampNumber(req.body.padding, 0, 0.5, 0.05);
     const mode = String(req.body.mode || 'viral');
-    const duration = await getDuration(input);
 
-    // 1) Detecta silêncio para MP3 limpo, mais agressivo.
-    const audioDurSilence = audioModeDuration(requestedDurationSilence, mode);
-    const audioDetect = await run('ffmpeg', ['-hide_banner', '-i', input, '-af', `silencedetect=noise=${threshold}dB:d=${audioDurSilence}`, '-f', 'null', '-']);
-    const audioSilences = parseSilences(audioDetect.stderr);
-    let audioRegions = regionsForMode(duration, audioSilences, Math.min(padding, 0.06), mode, 'audio');
+    // 1) Detecta as falas com o MESMO PADRÃO DO MP3 do Silence Pro.
+    // Não usa regra separada para vídeo. O MP3 e o MP4 saem dos mesmos pontos.
+    const detected = await detectKeepRegionsPadraoMP3(input, threshold, requestedDurationSilence, padding);
+    const duration = detected.duration;
+    let audioRegions = detected.regions;
     if (!audioRegions.length) audioRegions = [{ start: 0, end: duration }];
 
-    // 2) Gera MP3 separado.
+    // 2) Gera MP3 limpo com os pontos do padrão MP3.
     await extractCleanMp3ByRegions(input, audioRegions, mp3Out);
     let audioFinal = audioRegions.reduce((a, r) => a + (r.end - r.start), 0);
     try { audioFinal = await getDuration(mp3Out); } catch (_) {}
 
-    // 3) O MP4 usa os MESMOS PONTOS do MP3 limpo.
-    // Assim o vídeo também perde os silêncios e fica fácil juntar o MP3 no CapCut.
-    let videoRegions = prepareVideoRegionsFromAudio(audioRegions, duration, mode);
+    // 3) O MP4 usa esses MESMOS PONTOS. Só limita se for cena demais para o Render Free.
+    let videoRegions = limitVideoScenesPadrao(audioRegions, duration);
 
     // 4) Corta MP4 separado. O MP4 sai sem áudio para ficar leve; use o MP3 limpo por cima no CapCut.
     videoRegions = await makeVideoCut(input, videoRegions, tmpDir, mp4Out);
@@ -971,8 +1142,10 @@ app.post('/api/process', upload.single('file'), async (req, res) => {
         videoFinal,
         scenes: videoRegions.length,
         audioBlocks: audioRegions.length,
-        audioSilences: audioSilences.length,
-        videoSilences: audioSilences.length
+        audioSilences: detected.rawBlocks,
+        autoThreshold: threshold,
+        autoCutSeconds: Math.max(0, duration - audioFinal),
+        videoSilences: detected.rawBlocks
       }
     });
   } catch (err) {
