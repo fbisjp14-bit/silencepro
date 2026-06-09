@@ -1,36 +1,24 @@
-# Silence Pro MP4 único para Render - corrigido
+# Silence Pro MP4 único para Render — Smart HQ
 
-Esta versão mantém o painel visual do Silence Pro e processa vídeo no backend com FFmpeg.
+Versão para Render com foco em **qualidade + velocidade**.
 
 ## O que faz
 
-- Aceita MP4, MOV, WEBM e MKV.
-- Usa o áudio do vídeo para detectar silêncio.
-- Remove o silêncio/respiração baixa do áudio.
-- Remove as cenas do vídeo no mesmo ponto.
-- Entrega um MP4 único com áudio e vídeo juntos.
-- Não gera MP3 separado.
+- Aceita vídeo.
+- Usa o áudio como guia dos cortes.
+- Remove silêncio/respiração baixa.
+- Remove as cenas do vídeo no mesmo ponto dos cortes do áudio.
+- Entrega um único MP4 final com áudio e vídeo juntos.
+- Não entrega MP3 separado.
+- Mantém o painel visual do Silence Pro.
 
-## Como subir no Render
+## Motor Smart HQ
 
-Use como **Web Service**, não como Static Site.
+1. Primeiro tenta o modo rápido sem recomprimir o vídeo (`stream copy`), preservando a qualidade original quando o codec permite.
+2. Se o vídeo não permitir corte por cópia, cai automaticamente no modo compatível com qualidade alta.
+3. O fallback usa `libx264`, `preset ultrafast` e `CRF 17`, priorizando velocidade sem destruir a qualidade visual.
 
-Configuração recomendada:
-
-- Environment: Docker
-- Branch: main
-- Root Directory: vazio, se os arquivos estiverem na raiz
-- Plan: Free
-
-Depois de substituir os arquivos no GitHub, faça:
-
-1. Render > seu serviço
-2. Manual Deploy
-3. Clear build cache & deploy
-
-Se aparecer erro dizendo que recebeu `<!DOCTYPE html>`, o site ainda está como Static Site ou o Render está usando cache/arquivos antigos.
-
-## Arquivos necessários
+## Deploy no Render
 
 Substitua na raiz do GitHub:
 
@@ -41,12 +29,16 @@ server.js
 README.md
 ```
 
-## Observação
+Depois faça:
 
-Render grátis tem limite de CPU, memória e tempo. Para vídeos muito grandes, o processamento pode demorar ou falhar por limite do plano. Esta versão usa `ultrafast` para renderizar mais rápido.
+```text
+Manual Deploy -> Clear build cache & deploy
+```
 
+Teste o backend:
 
-## Ajuste desta versão
-- Painel visual e textos principais mantidos como no arquivo original.
-- Processamento otimizado: detecção de silêncio em áudio mono 16 kHz e renderização por blocos preservados.
-- O resultado continua sendo MP4 único com áudio e vídeo juntos.
+```text
+/health
+```
+
+Se retornar JSON com `ok: true`, está correto.
