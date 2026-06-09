@@ -58,6 +58,36 @@ function run(command, args, options = {}) {
   });
 }
 
+
+function runWithProgress(command, args, onProgress, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { ...options, windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => {
+      const text = d.toString();
+      stdout += text;
+      for (const line of text.split(/\r?\n/)) {
+        const m = line.match(/^out_time_ms=(\d+)/);
+        if (m && typeof onProgress === 'function') {
+          const seconds = Number(m[1]) / 1000000;
+          if (Number.isFinite(seconds)) onProgress(seconds);
+        }
+      }
+    });
+    child.stderr.on('data', d => stderr += d.toString());
+    child.on('error', reject);
+    child.on('close', code => {
+      if (code === 0) resolve({ stdout, stderr });
+      else {
+        const err = new Error((stderr || stdout || 'Erro desconhecido no FFmpeg.').slice(-3500));
+        err.code = code;
+        reject(err);
+      }
+    });
+  });
+}
+
 async function probe(inputPath) {
   const { stdout } = await run('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', inputPath]);
   const data = JSON.parse(stdout || '{}');
@@ -71,10 +101,11 @@ async function probe(inputPath) {
 }
 
 async function detectSilences(inputPath, thresholdDb, minSilenceSec) {
-  // Motor mais sensível para vídeo: no Render o usuário quer remover pausas/respirações,
-  // não apenas silêncio digital perfeito. Mantém o valor do painel, mas evita ficar fraco demais.
-  const effectiveThreshold = Math.max(Number(thresholdDb) || -30, -25);
-  const effectiveMinSilence = Math.max(0.03, Math.min(3, Number(minSilenceSec) || 0.10));
+  // MODO EQUILIBRADO / PADRÃO ORIGINAL:
+  // Usa exatamente a sensibilidade que vem do painel. Não força -25dB.
+  // Isso evita detectar respirações muito pequenas como silêncio e gerar cortes demais.
+  const effectiveThreshold = Math.max(-80, Math.min(-10, Number(thresholdDb) || -30));
+  const effectiveMinSilence = Math.max(0.01, Math.min(3, Number(minSilenceSec) || 0.10));
 
   const { stderr } = await run('ffmpeg', [
     '-hide_banner', '-nostdin', '-i', inputPath,
@@ -104,13 +135,26 @@ function buildCutRanges(duration, silences, openSilenceStart, paddingSec) {
   const cuts = [];
   const margin = Math.max(0, Math.min(0.25, Number(paddingSec) || 0));
   for (const s of ranges) {
-    // CORREÇÃO IMPORTANTE:
-    // antes o padding encolhia o corte (start + padding / end - padding).
-    // Em pausas curtas isso virava corte de 0s: detectava silêncio, mas não removia nada.
-    // Agora a margem expande um pouco o corte para tirar pausa/respiração de verdade.
-    const start = Math.max(0, Math.min(max, Number(s.start) - margin));
-    const end = Math.max(0, Math.min(max, Number(s.end) + margin));
-    if (end - start >= 0.035) cuts.push({ start, end });
+    // Padrão mais fiel ao original:
+    // o padding preserva um pequeno respiro antes/depois da fala, em vez de comer mais fala.
+    // Isso reduz cortes extras e deixa o resultado menos picotado.
+    const rawStart = Math.max(0, Math.min(max, Number(s.start)));
+    const rawEnd = Math.max(0, Math.min(max, Number(s.end)));
+    const rawLen = rawEnd - rawStart;
+    let start = Math.max(0, Math.min(max, rawStart + margin));
+    let end = Math.max(0, Math.min(max, rawEnd - margin));
+
+    // Se o silêncio é curto, não cria corte minúsculo demais.
+    // Cortes pequenos causam sensação de falha/chiado e aumentam o contador sem melhorar o vídeo.
+    if (end - start >= 0.060) {
+      cuts.push({ start, end });
+    } else if (rawLen >= 0.140) {
+      // fallback suave: remove só o miolo da pausa, preservando bordas naturais.
+      const centerPad = Math.min(rawLen * 0.35, margin || 0.025);
+      start = Math.max(0, rawStart + centerPad);
+      end = Math.min(max, rawEnd - centerPad);
+      if (end - start >= 0.060) cuts.push({ start, end });
+    }
   }
   cuts.sort((a, b) => a.start - b.start);
 
@@ -141,7 +185,7 @@ function buildKeepRanges(duration, cuts) {
   if (cursor < total - 0.02) keep.push({ start: cursor, end: total });
   // Evita microtrechos de áudio entre cortes muito próximos.
   // Esses pedaços minúsculos são os que mais geram chiado, estalo e sensação de erro no corte.
-  return keep.filter(r => r.end - r.start >= 0.090);
+  return keep.filter(r => r.end - r.start >= 0.060);
 }
 
 function quoteConcatPath(filePath) {
@@ -179,7 +223,7 @@ async function renderCopyConcat(inputPath, outputPath, cuts, duration) {
   }
 }
 
-async function renderPreciseSelect(inputPath, outputPath, cuts, duration) {
+async function renderPreciseSelect(inputPath, outputPath, cuts, duration, onProgress) {
   // ANTI-GAGO + ANTI-CHIADO:
   // 1) Não usa corte por cópia em keyframes, para não repetir fala.
   // 2) Usa trim/atrim com timestamps zerados.
@@ -211,20 +255,27 @@ async function renderPreciseSelect(inputPath, outputPath, cuts, duration) {
 
   await fsp.writeFile(filterPath, filter, 'utf8');
   try {
-    await run('ffmpeg', [
+    await runWithProgress('ffmpeg', [
       '-hide_banner', '-y', '-nostdin', '-i', inputPath,
       '-filter_complex_script', filterPath,
       '-map', '[vcat]', '-map', '[a]',
       '-c:v', 'libx264', '-preset', FFMPEG_PRESET, '-crf', FFMPEG_CRF,
       '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000',
-      '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-threads', '0', outputPath
-    ]);
+      '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-threads', '0',
+      '-progress', 'pipe:1', '-nostats', outputPath
+    ], (seconds) => {
+      if (typeof onProgress === 'function') {
+        const expected = Math.max(0.1, finalSecondsAfterCuts(duration, cuts));
+        const pct = 30 + Math.min(64, Math.round((seconds / expected) * 64));
+        onProgress(pct, 'Renderizando vídeo...');
+      }
+    });
   } finally {
     fsp.unlink(filterPath).catch(() => {});
   }
 }
 
-async function renderWithCuts(inputPath, outputPath, cuts, duration) {
+async function renderWithCuts(inputPath, outputPath, cuts, duration, onProgress) {
   if (!cuts.length) {
     // Sem corte real: cópia instantânea, sem perda de qualidade.
     await run('ffmpeg', [
@@ -250,7 +301,7 @@ async function renderWithCuts(inputPath, outputPath, cuts, duration) {
     }
   }
 
-  await renderPreciseSelect(inputPath, outputPath, cuts, duration);
+  await renderPreciseSelect(inputPath, outputPath, cuts, duration, onProgress);
   return { mode: 'precise-anti-gago-anti-chiado' };
 }
 
@@ -268,189 +319,122 @@ function cleanOldFiles() {
     });
   }
 }
-setInterval(cleanOldFiles, 1000 * 60 * 15).unref();
 
+setInterval(cleanOldFiles, 1000 * 60 * 15).unref();
 
 const jobs = new Map();
 
-function makeJob() {
-  const jobId = crypto.randomUUID();
-  const now = Date.now();
-  const job = {
-    id: jobId,
-    ok: false,
-    status: 'queued',
-    progress: 0,
-    message: 'Na fila...',
-    logs: [],
-    createdAt: now,
-    updatedAt: now,
-    result: null,
-    error: null
-  };
-  jobs.set(jobId, job);
-  return job;
-}
-
-function updateJob(job, patch) {
+function setJob(job, patch) {
   Object.assign(job, patch, { updatedAt: Date.now() });
 }
 
-function jobLog(job, msg, type = 'info') {
-  job.logs.push({ time: new Date().toLocaleTimeString('pt-PT', { hour12: false }), msg, type });
-  if (job.logs.length > 80) job.logs.shift();
-  job.updatedAt = Date.now();
-}
-
-async function processVideoToOutput(inputPath, originalName, threshold, minSilence, padding, job) {
-  jobLog(job, 'A analisar vídeo...', 'info');
-  updateJob(job, { status: 'processing', progress: 40, message: 'Analisando áudio...' });
-
-  const info = await probe(inputPath);
-  if (!info.hasVideo) throw new Error('O arquivo enviado não tem vídeo.');
-  if (!info.hasAudio) throw new Error('Este vídeo não tem áudio. O corte das cenas precisa do áudio como guia.');
-  if (!info.duration || !Number.isFinite(info.duration)) throw new Error('Não foi possível ler a duração do vídeo.');
-
-  updateJob(job, { progress: 55, message: 'Detectando silêncios...' });
-  const detected = await detectSilences(inputPath, threshold, minSilence);
-  const cuts = buildCutRanges(info.duration, detected.silences, detected.openSilenceStart, padding);
-  const finalSeconds = finalSecondsAfterCuts(info.duration, cuts);
-  if (finalSeconds < 0.2) throw new Error('O corte ficou agressivo demais e removeria quase tudo. Reduza o volume de corte ou use Natural.');
-
-  jobLog(job, `Silêncios detectados: ${detected.silences.length + (detected.openSilenceStart !== null ? 1 : 0)}`, 'success');
-  jobLog(job, `Cortes preparados: ${cuts.length}`, 'success');
-
-  updateJob(job, { progress: 70, message: 'Renderizando vídeo...' });
-  const outputName = 'SilencePro_' + safeBaseName(originalName) + '_MP4_limpo_' + crypto.randomUUID().slice(0, 8) + '.mp4';
-  const outputPath = path.join(OUTPUT_DIR, outputName);
-  const renderResult = await renderWithCuts(inputPath, outputPath, cuts, info.duration);
-
-  updateJob(job, { progress: 92, message: 'Finalizando arquivo...' });
-  const outInfo = await probe(outputPath).catch(() => null);
-  const realFinalSeconds = outInfo && outInfo.duration ? outInfo.duration : finalSeconds;
-  const reductionPercent = Math.max(0, Math.round((1 - realFinalSeconds / info.duration) * 100));
-
+function publicJob(job) {
+  if (!job) return null;
   return {
     ok: true,
-    fileName: outputName,
-    downloadUrl: '/download/' + encodeURIComponent(outputName),
-    originalSeconds: info.duration.toFixed(1),
-    finalSeconds: realFinalSeconds.toFixed(1),
-    reductionPercent,
-    silenceCount: detected.silences.length + (detected.openSilenceStart !== null ? 1 : 0),
-    cutCount: cuts.length,
-    renderMode: renderResult && renderResult.mode ? renderResult.mode : 'ok'
+    jobId: job.id,
+    status: job.status,
+    percent: Math.max(0, Math.min(100, Math.round(job.percent || 0))),
+    stage: job.stage || '',
+    error: job.error || null,
+    fileName: job.fileName || null,
+    downloadUrl: job.downloadUrl || null,
+    originalSeconds: job.originalSeconds || null,
+    finalSeconds: job.finalSeconds || null,
+    reductionPercent: job.reductionPercent ?? null,
+    silenceCount: job.silenceCount ?? null,
+    cutCount: job.cutCount ?? null,
+    renderMode: job.renderMode || null
   };
 }
 
-setInterval(() => {
-  const maxAgeMs = 1000 * 60 * 60 * 3;
-  for (const [id, job] of jobs) {
-    if (Date.now() - job.updatedAt > maxAgeMs) jobs.delete(id);
-  }
-}, 1000 * 60 * 15).unref();
-
-
-const INDEX_HTML = "<!DOCTYPE html>\n<html lang=\"pt-PT\" class=\"dark\">\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Silence Pro by Leinad | Removedor de Silêncio</title>\n    <script src=\"https://cdn.tailwindcss.com\"></script>\n    <script src=\"https://unpkg.com/lucide@latest\"></script>\n    <!-- Motor LameJS para codificação real do MP3 -->\n    <script src=\"https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js\"></script>\n    <script>\n        tailwind.config = {\n            darkMode: 'class',\n            theme: {\n                extend: {\n                    colors: {\n                        gray: {\n                            850: '#1f2937',\n                            900: '#111827',\n                            950: '#030712',\n                        }\n                    }\n                }\n            }\n        }\n    </script>\n    <style>\n        ::-webkit-scrollbar { width: 8px; }\n        ::-webkit-scrollbar-track { background: #111827; }\n        ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }\n        ::-webkit-scrollbar-thumb:hover { background: #4b5563; }\n        .glass-panel {\n            background: rgba(31, 41, 55, 0.7);\n            backdrop-filter: blur(10px);\n            border: 1px solid rgba(75, 85, 99, 0.4);\n        }\n    </style>\n</head>\n<body class=\"bg-gray-950 text-gray-100 min-h-screen flex flex-col font-sans selection:bg-blue-500 selection:text-white\">\n\n    <header class=\"border-b border-gray-800 bg-gray-900/50 backdrop-blur-md sticky top-0 z-50\">\n        <div class=\"max-w-5xl mx-auto px-4 h-16 flex items-center justify-between\">\n            <div class=\"flex items-center gap-3\">\n                <i data-lucide=\"scissors\" class=\"text-blue-500 w-6 h-6\"></i>\n                <div class=\"flex items-center\">\n                    <span class=\"font-bold text-xl tracking-tight\">Silence <span class=\"text-blue-500\">Pro</span></span>\n                    <span class=\"ml-3 text-[10px] uppercase tracking-wider font-bold px-2 py-0.5 bg-gray-800 text-gray-300 rounded-full border border-gray-700 shadow-sm\">by Leinad</span>\n                </div>\n            </div>\n            <div class=\"text-xs font-mono text-blue-400 bg-blue-400/10 px-2 py-1 rounded hidden sm:block\">Motor MP3 + Zero-Crossing Otimizado</div>\n        </div>\n    </header>\n\n    <main class=\"flex-1 max-w-5xl mx-auto px-4 py-8 w-full grid grid-cols-1 md:grid-cols-3 gap-6\">\n        \n        <div class=\"md:col-span-1 space-y-6\">\n            \n            <div id=\"drop-zone\" class=\"glass-panel rounded-2xl p-6 text-center border-dashed border-2 border-gray-700 hover:border-blue-500 transition-colors cursor-pointer group relative overflow-hidden\">\n                <input type=\"file\" id=\"audio-input\" accept=\"video/*,.mp4,.mov,.webm,.mkv\" class=\"absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10\">\n                <div class=\"flex flex-col items-center gap-3 pointer-events-none\">\n                    <div class=\"w-12 h-12 rounded-full bg-gray-800 flex items-center justify-center group-hover:scale-110 transition-transform\">\n                        <i data-lucide=\"upload-cloud\" class=\"text-blue-400 w-6 h-6\"></i>\n                    </div>\n                    <div>\n                        <p class=\"font-medium text-gray-200\">Arraste o seu áudio</p>\n                        <p class=\"text-xs text-gray-400 mt-1\">ou toque para procurar</p>\n                        <div class=\"mt-3 text-[11px] leading-relaxed text-gray-400 bg-gray-900/60 border border-gray-800 rounded-xl px-3 py-2\">\n                            <p>MP4, MOV, WEBM, MKV, MP3, WAV, M4A, AAC, OGG e FLAC.</p>\n                        </div>\n                    </div>\n                </div>\n                <div id=\"file-info\" class=\"hidden mt-4 pt-4 border-t border-gray-700 text-sm text-left\">\n                    <div class=\"flex items-center gap-2 text-green-400 mb-1\">\n                        <i data-lucide=\"check-circle\" class=\"w-4 h-4\"></i>\n                        <span class=\"font-medium truncate\" id=\"file-name\">processando...</span>\n                    </div>\n                    <span class=\"text-gray-400 text-xs\" id=\"file-size\">0 MB</span>\n                </div>\n            </div>\n\n            <div class=\"glass-panel rounded-2xl p-6 space-y-5\">\n                <div class=\"flex items-center justify-between mb-2\">\n                    <h3 class=\"font-semibold text-lg flex items-center gap-2\">\n                        <i data-lucide=\"sliders\" class=\"w-5 h-5 text-gray-400\"></i>\n                        Ajustes de Corte\n                    </h3>\n                </div>\n\n                <div class=\"space-y-3 pb-4 border-b border-gray-800\">\n                    <label class=\"text-sm text-gray-300 font-medium\">Estratégia de Retenção</label>\n                    <div class=\"grid grid-cols-3 gap-2\">\n                        <button type=\"button\" id=\"preset-extremo\" class=\"py-2 px-1 bg-gray-800 hover:bg-red-600 rounded-lg text-xs font-bold transition-colors border border-gray-700 hover:border-red-500 flex flex-col items-center justify-center text-center\">\n                            <span>🚀 Extremo</span>\n                            <span class=\"font-normal text-[9px] text-gray-200\">(Corte seco)</span>\n                        </button>\n                        <button type=\"button\" id=\"preset-agressivo\" class=\"py-2 px-1 bg-blue-600 rounded-lg text-xs font-bold transition-colors border border-blue-500 flex flex-col items-center justify-center text-center ring-2 ring-blue-500 ring-offset-2 ring-offset-gray-900\">\n                            <span>🔥 Viral Max</span>\n                            <span class=\"font-normal text-[9px] text-gray-300\">(Liso, sem ruído)</span>\n                        </button>\n                        <button type=\"button\" id=\"preset-natural\" class=\"py-2 px-1 bg-gray-800 hover:bg-green-600 rounded-lg text-xs font-bold transition-colors border border-gray-700 hover:border-green-500 flex flex-col items-center justify-center text-center\">\n                            <span>🎙️ Natural</span>\n                            <span class=\"font-normal text-[9px] text-gray-300\">(Podcast)</span>\n                        </button>\n                    </div>\n                </div>\n\n                <div class=\"space-y-2 pt-2\">\n                    <div class=\"flex justify-between text-sm\">\n                        <label class=\"text-gray-300\">Volume de corte (dB)</label>\n                        <span id=\"threshold-val\" class=\"font-mono text-blue-400\">-30 dB</span>\n                    </div>\n                    <input type=\"range\" id=\"threshold\" min=\"-80\" max=\"-10\" value=\"-30\" class=\"w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500\">\n                </div>\n\n                <div class=\"space-y-2\">\n                    <div class=\"flex justify-between text-sm\">\n                        <label class=\"text-gray-300\">Silêncio mínimo (seg)</label>\n                        <span id=\"duration-val\" class=\"font-mono text-blue-400\">0.10s</span>\n                    </div>\n                    <input type=\"range\" id=\"duration\" min=\"0.01\" max=\"3\" step=\"0.01\" value=\"0.10\" class=\"w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500\">\n                </div>\n                \n                <div class=\"space-y-2\">\n                    <div class=\"flex justify-between text-sm\">\n                        <label class=\"text-gray-300\">Margem natural (seg)</label>\n                        <span id=\"padding-val\" class=\"font-mono text-blue-400\">0.05s</span>\n                    </div>\n                    <input type=\"range\" id=\"padding\" min=\"0\" max=\"0.5\" step=\"0.01\" value=\"0.05\" class=\"w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500\">\n                </div>\n            </div>\n\n            <button id=\"process-btn\" disabled class=\"w-full py-4 rounded-xl font-bold text-lg bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(37,99,235,0.2)]\">\n                <i data-lucide=\"zap\" class=\"w-5 h-5\"></i>\n                Remover Silêncios\n            </button>\n        </div>\n\n        <div class=\"md:col-span-2 flex flex-col gap-6\">\n            \n            <div class=\"glass-panel rounded-2xl p-6 flex-1 flex flex-col relative\">\n                <h3 class=\"font-semibold text-lg flex items-center gap-2 mb-4\">\n                    <i data-lucide=\"activity\" class=\"w-5 h-5 text-gray-400\"></i>\n                    Estado do Processamento\n                </h3>\n                \n                <div id=\"log-container\" class=\"flex-1 bg-gray-900 rounded-xl p-4 font-mono text-sm text-gray-400 overflow-y-auto max-h-[300px] border border-gray-800 space-y-2\">\n                    <div class=\"text-gray-600\">A aguardar áudio...</div>\n                </div>\n\n                <div id=\"loading-overlay\" class=\"hidden absolute inset-0 bg-gray-900/80 backdrop-blur-sm rounded-2xl flex-col items-center justify-center z-10\">\n                    <div class=\"relative w-20 h-20 mb-4 flex items-center justify-center\">\n                        <div class=\"absolute inset-0 border-4 border-gray-700 border-t-blue-500 rounded-full animate-spin\"></div>\n                        <span id=\"loading-percent\" class=\"relative z-10 font-black text-sm text-white tabular-nums\">0%</span>\n                    </div>\n                    <p class=\"font-medium text-lg animate-pulse text-center\" id=\"loading-text\">Removendo silêncios...</p>\n                </div>\n            </div>\n\n            <div id=\"result-panel\" class=\"glass-panel rounded-2xl p-6 hidden ring-2 ring-blue-500 shadow-[0_0_30px_rgba(59,130,246,0.15)]\">\n                <div class=\"flex flex-col sm:flex-row items-center sm:items-start justify-between gap-4\">\n                    <div class=\"text-center sm:text-left\">\n                        <h3 class=\"font-bold text-xl text-blue-400 flex items-center justify-center sm:justify-start gap-2 mb-1\">\n                            <i data-lucide=\"party-popper\" class=\"w-6 h-6\"></i>\n                            MP3 Pronto a Usar!\n                        </h3>\n                        <p class=\"text-sm font-mono text-green-400 bg-green-400/10 px-2 py-1 rounded inline-block mt-1\" id=\"result-stats\">Calculando redução...</p>\n                    </div>\n                    \n                    <a id=\"download-btn\" href=\"#\" download=\"video_viral_limpo.mp4\" class=\"w-full sm:w-auto px-8 py-4 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 rounded-xl font-black text-lg flex items-center justify-center gap-2 transition-all transform hover:scale-105 shadow-lg cursor-pointer\">\n                        <i data-lucide=\"download\" class=\"w-6 h-6\"></i>\n                        BAIXAR MP4\n                    </a>\n                </div>\n                <div class=\"mt-6 pt-4 border-t border-gray-700\">\n                    <video id=\"audio-preview\" controls class=\"w-full rounded-lg bg-black max-h-[430px]\"></video>\n                </div>\n            </div>\n\n        </div>\n    </main>\n\n    <footer class=\"w-full text-center pb-8 pt-4\">\n        <p class=\"text-[11px] text-gray-500 font-medium tracking-widest uppercase\">\"Que Ele cresça e eu diminua.\" <span class=\"text-gray-600 ml-1\">- João 3:30</span></p>\n    </footer>\n\n    <script>\n        lucide.createIcons();\n\n        const fileInput = document.getElementById('audio-input');\n        const dropZone = document.getElementById('drop-zone');\n        const fileNameEl = document.getElementById('file-name');\n        const fileSizeEl = document.getElementById('file-size');\n        const fileInfoEl = document.getElementById('file-info');\n        const processBtn = document.getElementById('process-btn');\n        const thresholdInput = document.getElementById('threshold');\n        const durationInput = document.getElementById('duration');\n        const paddingInput = document.getElementById('padding');\n        const thresholdVal = document.getElementById('threshold-val');\n        const durationVal = document.getElementById('duration-val');\n        const paddingVal = document.getElementById('padding-val');\n        const logContainer = document.getElementById('log-container');\n        const loadingOverlay = document.getElementById('loading-overlay');\n        const loadingText = document.getElementById('loading-text');\n        const loadingPercent = document.getElementById('loading-percent');\n        const resultPanel = document.getElementById('result-panel');\n        const resultStats = document.getElementById('result-stats');\n        const downloadBtn = document.getElementById('download-btn');\n        const audioPreview = document.getElementById('audio-preview');\n        const presetExtremo = document.getElementById('preset-extremo');\n        const presetAgressivo = document.getElementById('preset-agressivo');\n        const presetNatural = document.getElementById('preset-natural');\n\n        let currentFile = null;\n        let progressTimer = null;\n        let visualProgress = 0;\n\n        function setLoadingProgress(value, text) {\n            visualProgress = Math.max(0, Math.min(100, Math.round(value)));\n            loadingPercent.textContent = `${visualProgress}%`;\n            if (text) loadingText.textContent = text;\n        }\n\n        function stopProgressSimulation() {\n            if (progressTimer) {\n                clearInterval(progressTimer);\n                progressTimer = null;\n            }\n        }\n\n        function startProcessingProgress() {\n            stopProgressSimulation();\n            progressTimer = setInterval(() => {\n                if (visualProgress >= 95) return;\n                const step = visualProgress < 70 ? 2 : visualProgress < 85 ? 1 : 0.4;\n                setLoadingProgress(visualProgress + step, 'Removendo silêncios...');\n            }, 350);\n        }\n\n        function sendProcessRequest(form) {\n            return new Promise((resolve, reject) => {\n                const xhr = new XMLHttpRequest();\n                xhr.open('POST', '/start-process', true);\n                xhr.responseType = 'json';\n\n                xhr.upload.onloadstart = () => {\n                    setLoadingProgress(3, 'A preparar envio...');\n                };\n\n                xhr.upload.onprogress = (event) => {\n                    if (!event.lengthComputable) return;\n                    const uploadProgress = 5 + Math.round((event.loaded / event.total) * 30);\n                    setLoadingProgress(Math.min(35, uploadProgress), 'A enviar vídeo...');\n                };\n\n                xhr.onerror = () => reject(new Error('Falha de rede ao enviar o vídeo.'));\n\n                xhr.onload = () => {\n                    const contentType = xhr.getResponseHeader('content-type') || '';\n                    if (!contentType.includes('application/json')) {\n                        const text = xhr.responseText || '';\n                        reject(new Error('O backend não respondeu JSON. Confirme se o Render está como Web Service + Docker e faça Manual Deploy Clear build cache. Resposta: ' + text.slice(0, 120)));\n                        return;\n                    }\n\n                    const data = xhr.response || {};\n                    if (xhr.status < 200 || xhr.status >= 300 || !data.ok || !data.jobId) {\n                        reject(new Error(data.error || 'Erro ao iniciar processamento.'));\n                        return;\n                    }\n\n                    resolve(data.jobId);\n                };\n\n                xhr.send(form);\n            });\n        }\n\n        function renderJobLogs(logs) {\n            if (!Array.isArray(logs) || logs.length === 0) return;\n            logContainer.innerHTML = '';\n            const colors = { info: 'text-gray-300', success: 'text-green-400', error: 'text-red-400', warn: 'text-yellow-400' };\n            logs.forEach(item => {\n                const line = document.createElement('div');\n                line.className = colors[item.type] || colors.info;\n                line.textContent = `[${item.time}] ${item.msg}`;\n                logContainer.appendChild(line);\n            });\n            logContainer.scrollTop = logContainer.scrollHeight;\n        }\n\n        function pollJob(jobId) {\n            return new Promise((resolve, reject) => {\n                let stopped = false;\n\n                const tick = async () => {\n                    if (stopped) return;\n                    try {\n                        const res = await fetch('/job/' + encodeURIComponent(jobId), { cache: 'no-store' });\n                        const data = await res.json();\n                        if (!res.ok || !data.ok) throw new Error(data.error || 'Falha ao consultar progresso.');\n\n                        setLoadingProgress(data.progress || 0, data.message || 'Processando...');\n                        renderJobLogs(data.logs);\n\n                        if (data.status === 'done') {\n                            stopped = true;\n                            localStorage.removeItem('silencepro_active_job');\n                            resolve(data.result);\n                            return;\n                        }\n\n                        if (data.status === 'error') {\n                            stopped = true;\n                            localStorage.removeItem('silencepro_active_job');\n                            reject(new Error(data.error || 'Erro no processamento.'));\n                            return;\n                        }\n\n                        setTimeout(tick, 2500);\n                    } catch (error) {\n                        stopped = true;\n                        reject(error);\n                    }\n                };\n\n                tick();\n            });\n        }\n\n        async function continueJob(jobId) {\n            loadingOverlay.classList.remove('hidden');\n            loadingOverlay.classList.add('flex');\n            processBtn.disabled = true;\n            resultPanel.classList.add('hidden');\n            setLoadingProgress(35, 'Retomando processamento...');\n\n            try {\n                const data = await pollJob(jobId);\n                setLoadingProgress(100, 'Processamento concluído!');\n\n                downloadBtn.href = data.downloadUrl;\n                downloadBtn.download = data.fileName || 'SilencePro_video_limpo.mp4';\n                audioPreview.src = data.downloadUrl;\n                resultStats.textContent = `Original: ${data.originalSeconds}s | Limpo: ${data.finalSeconds}s | Redução: ${data.reductionPercent}%`;\n                resultPanel.classList.remove('hidden');\n            } catch (error) {\n                console.error(error);\n                loadingText.textContent = 'Erro no processamento';\n                log(`ERRO CRÍTICO: ${error.message}`, 'error');\n            } finally {\n                setTimeout(() => {\n                    loadingOverlay.classList.add('hidden');\n                    loadingOverlay.classList.remove('flex');\n                    processBtn.disabled = false;\n                }, 400);\n            }\n        }\n\n        function updateSliderUI() {\n            thresholdVal.textContent = `${thresholdInput.value} dB`;\n            durationVal.textContent = `${parseFloat(durationInput.value).toFixed(2)}s`;\n            paddingVal.textContent = `${parseFloat(paddingInput.value).toFixed(2)}s`;\n        }\n        thresholdInput.addEventListener('input', updateSliderUI);\n        durationInput.addEventListener('input', updateSliderUI);\n        paddingInput.addEventListener('input', updateSliderUI);\n\n        function resetButtons() {\n            [presetExtremo, presetAgressivo, presetNatural].forEach(btn => {\n                btn.className = 'py-2 px-1 bg-gray-800 rounded-lg text-xs font-bold transition-colors border border-gray-700 flex flex-col items-center justify-center text-center';\n            });\n        }\n        presetExtremo.addEventListener('click', () => {\n            resetButtons();\n            presetExtremo.className = 'py-2 px-1 bg-red-600 rounded-lg text-xs font-bold transition-colors border border-red-500 flex flex-col items-center justify-center text-center ring-2 ring-red-500 ring-offset-2 ring-offset-gray-900';\n            thresholdInput.value = -30;\n            durationInput.value = 0.04;\n            paddingInput.value = 0.02;\n            updateSliderUI();\n            log('Modo Extremo ativado.', 'info');\n        });\n        presetAgressivo.addEventListener('click', () => {\n            resetButtons();\n            presetAgressivo.className = 'py-2 px-1 bg-blue-600 rounded-lg text-xs font-bold transition-colors border border-blue-500 flex flex-col items-center justify-center text-center ring-2 ring-blue-500 ring-offset-2 ring-offset-gray-900';\n            thresholdInput.value = -30;\n            durationInput.value = 0.10;\n            paddingInput.value = 0.05;\n            updateSliderUI();\n            log('Modo Viral Max ativado.', 'info');\n        });\n        presetNatural.addEventListener('click', () => {\n            resetButtons();\n            presetNatural.className = 'py-2 px-1 bg-green-600 rounded-lg text-xs font-bold transition-colors border border-green-500 flex flex-col items-center justify-center text-center ring-2 ring-green-500 ring-offset-2 ring-offset-gray-900';\n            thresholdInput.value = -40;\n            durationInput.value = 0.30;\n            paddingInput.value = 0.05;\n            updateSliderUI();\n            log('Modo Natural (Podcast) ativado.', 'info');\n        });\n\n        function log(msg, type = 'info') {\n            const colors = { info: 'text-gray-300', success: 'text-green-400', error: 'text-red-400', warn: 'text-yellow-400' };\n            if (logContainer.innerHTML.includes('A aguardar')) logContainer.innerHTML = '';\n            const time = new Date().toLocaleTimeString('pt-PT', { hour12: false });\n            const line = document.createElement('div');\n            line.className = colors[type] || colors.info;\n            line.textContent = `[${time}] ${msg}`;\n            logContainer.appendChild(line);\n            logContainer.scrollTop = logContainer.scrollHeight;\n        }\n\n        function handleFile(file) {\n            if (!file) return;\n            const validVideoExts = ['.mp4', '.mov', '.webm', '.mkv'];\n            const ext = file.name.includes('.') ? file.name.substring(file.name.lastIndexOf('.')).toLowerCase() : '';\n            const isVideo = file.type.startsWith('video/') || validVideoExts.includes(ext);\n            if (!isVideo) {\n                log('Formato inválido. Esta versão aceita vídeo: MP4, MOV, WEBM ou MKV.', 'error');\n                return;\n            }\n            currentFile = file;\n            fileNameEl.textContent = file.name;\n            fileSizeEl.textContent = (file.size / (1024 * 1024)).toFixed(2) + ' MB';\n            fileInfoEl.classList.remove('hidden');\n            processBtn.disabled = false;\n            resultPanel.classList.add('hidden');\n            audioPreview.removeAttribute('src');\n            log(`Processando: ${file.name}`, 'info');\n        }\n\n        fileInput.addEventListener('click', (e) => { e.target.value = ''; });\n        fileInput.addEventListener('change', (e) => handleFile(e.target.files[0]));\n        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('border-blue-500', 'bg-gray-800/50'); });\n        dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('border-blue-500', 'bg-gray-800/50'); });\n        dropZone.addEventListener('drop', (e) => { e.preventDefault(); dropZone.classList.remove('border-blue-500', 'bg-gray-800/50'); handleFile(e.dataTransfer.files[0]); });\n\n        processBtn.addEventListener('click', async () => {\n            if (!currentFile) return;\n            loadingOverlay.classList.remove('hidden');\n            loadingOverlay.classList.add('flex');\n            processBtn.disabled = true;\n            logContainer.innerHTML = '';\n            resultPanel.classList.add('hidden');\n            stopProgressSimulation();\n            setLoadingProgress(0, 'A iniciar processamento...');\n\n            try {\n                log('A ligar o motor de áudio...', 'info');\n                const form = new FormData();\n                form.append('video', currentFile);\n                form.append('threshold', thresholdInput.value);\n                form.append('duration', durationInput.value);\n                form.append('padding', paddingInput.value);\n\n                const jobId = await sendProcessRequest(form);\n                localStorage.setItem('silencepro_active_job', jobId);\n                log('Upload concluído. Agora pode deixar o servidor processar.', 'success');\n                setLoadingProgress(35, 'Processando no servidor...');\n                const data = await pollJob(jobId);\n\n                setLoadingProgress(100, 'Processamento concluído!');\n                downloadBtn.href = data.downloadUrl;\n                downloadBtn.download = data.fileName || 'SilencePro_video_limpo.mp4';\n                audioPreview.src = data.downloadUrl;\n                resultStats.textContent = `Original: ${data.originalSeconds}s | Limpo: ${data.finalSeconds}s | Redução: ${data.reductionPercent}%`;\n                resultPanel.classList.remove('hidden');\n            } catch (error) {\n                console.error(error);\n                loadingText.textContent = 'Erro no processamento';\n                log(`ERRO CRÍTICO: ${error.message}`, 'error');\n            } finally {\n                stopProgressSimulation();\n                setTimeout(() => {\n                    loadingOverlay.classList.add('hidden');\n                    loadingOverlay.classList.remove('flex');\n                    processBtn.disabled = false;\n                }, 400);\n            }\n        });\n\n        const savedJobId = localStorage.getItem('silencepro_active_job');\n        if (savedJobId) {\n            log('Processamento anterior encontrado. Retomando acompanhamento...', 'info');\n            continueJob(savedJobId);\n        }\n    </script>\n</body>\n</html>\n";
-
-app.get('/health', (req, res) => res.json({ ok: true, service: 'Silence Pro MP4', ffmpeg: true }));
-app.get('/', (req, res) => res.type('html').send(INDEX_HTML));
-
-
-app.post('/start-process', upload.single('video'), async (req, res) => {
-  const inputPath = req.file && req.file.path;
-  try {
-    if (!req.file) throw new Error('Nenhum vídeo foi enviado.');
-    const threshold = Math.max(-80, Math.min(-10, Number(req.body.threshold || -30)));
-    const minSilence = Math.max(0.01, Math.min(3, Number(req.body.duration || 0.10)));
-    const padding = Math.max(0, Math.min(0.5, Number(req.body.padding || 0.05)));
-
-    const job = makeJob();
-    updateJob(job, { status: 'processing', progress: 35, message: 'Upload concluído. Processando no servidor...' });
-    jobLog(job, 'Upload concluído. O processamento continuará no servidor.', 'success');
-
-    res.json({ ok: true, jobId: job.id });
-
-    (async () => {
-      try {
-        const result = await processVideoToOutput(inputPath, req.file.originalname, threshold, minSilence, padding, job);
-        updateJob(job, { ok: true, status: 'done', progress: 100, message: 'Processamento concluído!', result });
-        jobLog(job, 'Pronto! Processamento concluído.', 'success');
-      } catch (err) {
-        updateJob(job, { ok: false, status: 'error', progress: 100, message: 'Erro no processamento', error: err.message || 'Erro ao processar vídeo.' });
-        jobLog(job, 'ERRO CRÍTICO: ' + (err.message || 'Erro ao processar vídeo.'), 'error');
-      } finally {
-        if (inputPath) fsp.unlink(inputPath).catch(() => {});
-      }
-    })();
-  } catch (err) {
-    if (inputPath) fsp.unlink(inputPath).catch(() => {});
-    res.status(400).json({ ok: false, error: err.message || 'Erro ao iniciar processamento.' });
-  }
-});
-
-app.get('/job/:id', (req, res) => {
-  const job = jobs.get(req.params.id);
-  if (!job) {
-    res.status(404).json({ ok: false, error: 'Processamento não encontrado ou expirado.' });
-    return;
-  }
-  res.json({
-    ok: true,
-    id: job.id,
-    status: job.status,
-    progress: job.progress,
-    message: job.message,
-    logs: job.logs,
-    result: job.result,
-    error: job.error
-  });
-});
-
-
-app.post('/process', upload.single('video'), async (req, res) => {
-  const inputPath = req.file && req.file.path;
+async function processJob(job, file, body) {
+  const inputPath = file && file.path;
   let outputPath = null;
   try {
-    if (!req.file) throw new Error('Nenhum vídeo foi enviado.');
-    const threshold = Math.max(-80, Math.min(-10, Number(req.body.threshold || -30)));
-    const minSilence = Math.max(0.01, Math.min(3, Number(req.body.duration || 0.10)));
-    const padding = Math.max(0, Math.min(0.5, Number(req.body.padding || 0.05)));
+    if (!file) throw new Error('Nenhum vídeo foi enviado.');
+    setJob(job, { status: 'processing', percent: 3, stage: 'Lendo arquivo...' });
+    const threshold = Math.max(-80, Math.min(-10, Number(body.threshold || -30)));
+    const minSilence = Math.max(0.01, Math.min(3, Number(body.duration || 0.10)));
+    const padding = Math.max(0, Math.min(0.5, Number(body.padding || 0.05)));
 
     const info = await probe(inputPath);
     if (!info.hasVideo) throw new Error('O arquivo enviado não tem vídeo.');
     if (!info.hasAudio) throw new Error('Este vídeo não tem áudio. O corte das cenas precisa do áudio como guia.');
     if (!info.duration || !Number.isFinite(info.duration)) throw new Error('Não foi possível ler a duração do vídeo.');
+    setJob(job, { percent: 10, stage: 'Detectando silêncios...' });
 
     const detected = await detectSilences(inputPath, threshold, minSilence);
+    setJob(job, { percent: 24, stage: 'Calculando cortes...' });
     const cuts = buildCutRanges(info.duration, detected.silences, detected.openSilenceStart, padding);
     const finalSeconds = finalSecondsAfterCuts(info.duration, cuts);
     if (finalSeconds < 0.2) throw new Error('O corte ficou agressivo demais e removeria quase tudo. Reduza o volume de corte ou use Natural.');
 
-    const outputName = 'SilencePro_' + safeBaseName(req.file.originalname) + '_MP4_limpo_' + crypto.randomUUID().slice(0, 8) + '.mp4';
+    const outputName = 'SilencePro_' + safeBaseName(file.originalname) + '_MP4_limpo_' + crypto.randomUUID().slice(0, 8) + '.mp4';
     outputPath = path.join(OUTPUT_DIR, outputName);
-    const renderResult = await renderWithCuts(inputPath, outputPath, cuts, info.duration);
+    setJob(job, { percent: 30, stage: 'Renderizando vídeo...' });
+    const renderResult = await renderWithCuts(inputPath, outputPath, cuts, info.duration, (percent, stage) => setJob(job, { percent, stage }));
 
+    setJob(job, { percent: 96, stage: 'Finalizando arquivo...' });
     const outInfo = await probe(outputPath).catch(() => null);
     const realFinalSeconds = outInfo && outInfo.duration ? outInfo.duration : finalSeconds;
     const reductionPercent = Math.max(0, Math.round((1 - realFinalSeconds / info.duration) * 100));
-    res.json({
-      ok: true,
-      fileName: outputName,
+    setJob(job, {
+      status: 'done', percent: 100, stage: 'Pronto para baixar!', fileName: outputName,
       downloadUrl: '/download/' + encodeURIComponent(outputName),
-      originalSeconds: info.duration.toFixed(1),
-      finalSeconds: realFinalSeconds.toFixed(1),
-      reductionPercent,
+      originalSeconds: info.duration.toFixed(1), finalSeconds: realFinalSeconds.toFixed(1), reductionPercent,
       silenceCount: detected.silences.length + (detected.openSilenceStart !== null ? 1 : 0),
-      cutCount: cuts.length,
-      renderMode: renderResult && renderResult.mode ? renderResult.mode : 'ok'
+      cutCount: cuts.length, renderMode: renderResult && renderResult.mode ? renderResult.mode : 'ok'
     });
   } catch (err) {
     if (outputPath) fsp.unlink(outputPath).catch(() => {});
-    res.status(400).json({ ok: false, error: err.message || 'Erro ao processar vídeo.' });
+    setJob(job, { status: 'error', percent: Math.max(1, job.percent || 1), stage: 'Erro no processamento', error: err.message || 'Erro ao processar vídeo.' });
   } finally {
     if (inputPath) fsp.unlink(inputPath).catch(() => {});
   }
+}
+
+function cleanOldJobs() {
+  const maxAgeMs = 1000 * 60 * 60;
+  for (const [id, job] of jobs.entries()) {
+    if (Date.now() - (job.updatedAt || job.createdAt || 0) > maxAgeMs) jobs.delete(id);
+  }
+}
+setInterval(cleanOldJobs, 1000 * 60 * 15).unref();
+
+const INDEX_HTML = "<!DOCTYPE html>\n<html lang=\"pt-PT\" class=\"dark\">\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Silence Pro by Leinad | Removedor de Silêncio</title>\n    <script src=\"https://cdn.tailwindcss.com\"></script>\n    <script src=\"https://unpkg.com/lucide@latest\"></script>\n    <!-- Motor LameJS para codificação real do MP3 -->\n    <script src=\"https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js\"></script>\n    <script>\n        tailwind.config = {\n            darkMode: 'class',\n            theme: {\n                extend: {\n                    colors: {\n                        gray: {\n                            850: '#1f2937',\n                            900: '#111827',\n                            950: '#030712',\n                        }\n                    }\n                }\n            }\n        }\n    </script>\n    <style>\n        ::-webkit-scrollbar { width: 8px; }\n        ::-webkit-scrollbar-track { background: #111827; }\n        ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }\n        ::-webkit-scrollbar-thumb:hover { background: #4b5563; }\n        .glass-panel {\n            background: rgba(31, 41, 55, 0.7);\n            backdrop-filter: blur(10px);\n            border: 1px solid rgba(75, 85, 99, 0.4);\n        }\n    </style>\n</head>\n<body class=\"bg-gray-950 text-gray-100 min-h-screen flex flex-col font-sans selection:bg-blue-500 selection:text-white\">\n\n    <header class=\"border-b border-gray-800 bg-gray-900/50 backdrop-blur-md sticky top-0 z-50\">\n        <div class=\"max-w-5xl mx-auto px-4 h-16 flex items-center justify-between\">\n            <div class=\"flex items-center gap-3\">\n                <i data-lucide=\"scissors\" class=\"text-blue-500 w-6 h-6\"></i>\n                <div class=\"flex items-center\">\n                    <span class=\"font-bold text-xl tracking-tight\">Silence <span class=\"text-blue-500\">Pro</span></span>\n                    <span class=\"ml-3 text-[10px] uppercase tracking-wider font-bold px-2 py-0.5 bg-gray-800 text-gray-300 rounded-full border border-gray-700 shadow-sm\">by Leinad</span>\n                </div>\n            </div>\n            <div class=\"text-xs font-mono text-blue-400 bg-blue-400/10 px-2 py-1 rounded hidden sm:block\">Motor MP3 + Zero-Crossing Otimizado</div>\n        </div>\n    </header>\n\n    <main class=\"flex-1 max-w-5xl mx-auto px-4 py-8 w-full grid grid-cols-1 md:grid-cols-3 gap-6\">\n        \n        <div class=\"md:col-span-1 space-y-6\">\n            \n            <div id=\"drop-zone\" class=\"glass-panel rounded-2xl p-6 text-center border-dashed border-2 border-gray-700 hover:border-blue-500 transition-colors cursor-pointer group relative overflow-hidden\">\n                <input type=\"file\" id=\"audio-input\" accept=\"video/*,.mp4,.mov,.webm,.mkv\" class=\"absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10\">\n                <div class=\"flex flex-col items-center gap-3 pointer-events-none\">\n                    <div class=\"w-12 h-12 rounded-full bg-gray-800 flex items-center justify-center group-hover:scale-110 transition-transform\">\n                        <i data-lucide=\"upload-cloud\" class=\"text-blue-400 w-6 h-6\"></i>\n                    </div>\n                    <div>\n                        <p class=\"font-medium text-gray-200\">Arraste o seu áudio</p>\n                        <p class=\"text-xs text-gray-400 mt-1\">ou toque para procurar</p>\n                        <div class=\"mt-3 text-[11px] leading-relaxed text-gray-400 bg-gray-900/60 border border-gray-800 rounded-xl px-3 py-2\">\n                            <p>MP4, MOV, WEBM, MKV, MP3, WAV, M4A, AAC, OGG e FLAC.</p>\n                        </div>\n                    </div>\n                </div>\n                <div id=\"file-info\" class=\"hidden mt-4 pt-4 border-t border-gray-700 text-sm text-left\">\n                    <div class=\"flex items-center gap-2 text-green-400 mb-1\">\n                        <i data-lucide=\"check-circle\" class=\"w-4 h-4\"></i>\n                        <span class=\"font-medium truncate\" id=\"file-name\">processando...</span>\n                    </div>\n                    <span class=\"text-gray-400 text-xs\" id=\"file-size\">0 MB</span>\n                </div>\n            </div>\n\n            <div class=\"glass-panel rounded-2xl p-6 space-y-5\">\n                <div class=\"flex items-center justify-between mb-2\">\n                    <h3 class=\"font-semibold text-lg flex items-center gap-2\">\n                        <i data-lucide=\"sliders\" class=\"w-5 h-5 text-gray-400\"></i>\n                        Ajustes de Corte\n                    </h3>\n                </div>\n\n                <div class=\"space-y-3 pb-4 border-b border-gray-800\">\n                    <label class=\"text-sm text-gray-300 font-medium\">Estratégia de Retenção</label>\n                    <div class=\"grid grid-cols-3 gap-2\">\n                        <button type=\"button\" id=\"preset-extremo\" class=\"py-2 px-1 bg-gray-800 hover:bg-red-600 rounded-lg text-xs font-bold transition-colors border border-gray-700 hover:border-red-500 flex flex-col items-center justify-center text-center\">\n                            <span>🚀 Extremo</span>\n                            <span class=\"font-normal text-[9px] text-gray-200\">(Corte seco)</span>\n                        </button>\n                        <button type=\"button\" id=\"preset-agressivo\" class=\"py-2 px-1 bg-blue-600 rounded-lg text-xs font-bold transition-colors border border-blue-500 flex flex-col items-center justify-center text-center ring-2 ring-blue-500 ring-offset-2 ring-offset-gray-900\">\n                            <span>🔥 Viral Max</span>\n                            <span class=\"font-normal text-[9px] text-gray-300\">(Liso, sem ruído)</span>\n                        </button>\n                        <button type=\"button\" id=\"preset-natural\" class=\"py-2 px-1 bg-gray-800 hover:bg-green-600 rounded-lg text-xs font-bold transition-colors border border-gray-700 hover:border-green-500 flex flex-col items-center justify-center text-center\">\n                            <span>🎙️ Natural</span>\n                            <span class=\"font-normal text-[9px] text-gray-300\">(Podcast)</span>\n                        </button>\n                    </div>\n                </div>\n\n                <div class=\"space-y-2 pt-2\">\n                    <div class=\"flex justify-between text-sm\">\n                        <label class=\"text-gray-300\">Volume de corte (dB)</label>\n                        <span id=\"threshold-val\" class=\"font-mono text-blue-400\">-30 dB</span>\n                    </div>\n                    <input type=\"range\" id=\"threshold\" min=\"-80\" max=\"-10\" value=\"-30\" class=\"w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500\">\n                </div>\n\n                <div class=\"space-y-2\">\n                    <div class=\"flex justify-between text-sm\">\n                        <label class=\"text-gray-300\">Silêncio mínimo (seg)</label>\n                        <span id=\"duration-val\" class=\"font-mono text-blue-400\">0.10s</span>\n                    </div>\n                    <input type=\"range\" id=\"duration\" min=\"0.01\" max=\"3\" step=\"0.01\" value=\"0.10\" class=\"w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500\">\n                </div>\n                \n                <div class=\"space-y-2\">\n                    <div class=\"flex justify-between text-sm\">\n                        <label class=\"text-gray-300\">Margem natural (seg)</label>\n                        <span id=\"padding-val\" class=\"font-mono text-blue-400\">0.05s</span>\n                    </div>\n                    <input type=\"range\" id=\"padding\" min=\"0\" max=\"0.5\" step=\"0.01\" value=\"0.05\" class=\"w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500\">\n                </div>\n            </div>\n\n            <button id=\"process-btn\" disabled class=\"w-full py-4 rounded-xl font-bold text-lg bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(37,99,235,0.2)]\">\n                <i data-lucide=\"zap\" class=\"w-5 h-5\"></i>\n                Remover Silêncios\n            </button>\n        </div>\n\n        <div class=\"md:col-span-2 flex flex-col gap-6\">\n            \n            <div class=\"glass-panel rounded-2xl p-6 flex-1 flex flex-col relative\">\n                <h3 class=\"font-semibold text-lg flex items-center gap-2 mb-4\">\n                    <i data-lucide=\"activity\" class=\"w-5 h-5 text-gray-400\"></i>\n                    Estado do Processamento\n                </h3>\n                \n                <div id=\"log-container\" class=\"flex-1 bg-gray-900 rounded-xl p-4 font-mono text-sm text-gray-400 overflow-y-auto max-h-[300px] border border-gray-800 space-y-2\">\n                    <div class=\"text-gray-600\">A aguardar áudio...</div>\n                </div>\n\n                <div id=\"loading-overlay\" class=\"hidden absolute inset-0 bg-gray-900/80 backdrop-blur-sm rounded-2xl flex-col items-center justify-center z-10\">\n                    <div class=\"relative w-20 h-20 mb-4\">\n                        <div class=\"absolute inset-0 border-4 border-gray-700 border-t-blue-500 rounded-full animate-spin\"></div>\n                        <div id=\"loading-percent\" class=\"absolute inset-0 flex items-center justify-center text-lg font-black text-white\">0%</div>\n                    </div>\n                    <p class=\"font-medium text-lg animate-pulse\" id=\"loading-text\">Removendo silêncios...</p>\n                </div>\n            </div>\n\n            <div id=\"result-panel\" class=\"glass-panel rounded-2xl p-6 hidden ring-2 ring-blue-500 shadow-[0_0_30px_rgba(59,130,246,0.15)]\">\n                <div class=\"flex flex-col sm:flex-row items-center sm:items-start justify-between gap-4\">\n                    <div class=\"text-center sm:text-left\">\n                        <h3 class=\"font-bold text-xl text-blue-400 flex items-center justify-center sm:justify-start gap-2 mb-1\">\n                            <i data-lucide=\"party-popper\" class=\"w-6 h-6\"></i>\n                            MP3 Pronto a Usar!\n                        </h3>\n                        <p class=\"text-sm font-mono text-green-400 bg-green-400/10 px-2 py-1 rounded inline-block mt-1\" id=\"result-stats\">Calculando redução...</p>\n                    </div>\n                    \n                    <a id=\"download-btn\" href=\"#\" download=\"video_viral_limpo.mp4\" class=\"w-full sm:w-auto px-8 py-4 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 rounded-xl font-black text-lg flex items-center justify-center gap-2 transition-all transform hover:scale-105 shadow-lg cursor-pointer\">\n                        <i data-lucide=\"download\" class=\"w-6 h-6\"></i>\n                        BAIXAR MP4\n                    </a>\n                </div>\n                <div class=\"mt-6 pt-4 border-t border-gray-700\">\n                    <video id=\"audio-preview\" controls class=\"w-full rounded-lg bg-black max-h-[430px]\"></video>\n                </div>\n            </div>\n\n        </div>\n    </main>\n\n    <footer class=\"w-full text-center pb-8 pt-4\">\n        <p class=\"text-[11px] text-gray-500 font-medium tracking-widest uppercase\">\"Que Ele cresça e eu diminua.\" <span class=\"text-gray-600 ml-1\">- João 3:30</span></p>\n    </footer>\n\n    <script>\n        lucide.createIcons();\n\n        const fileInput = document.getElementById('audio-input');\n        const dropZone = document.getElementById('drop-zone');\n        const fileNameEl = document.getElementById('file-name');\n        const fileSizeEl = document.getElementById('file-size');\n        const fileInfoEl = document.getElementById('file-info');\n        const processBtn = document.getElementById('process-btn');\n        const thresholdInput = document.getElementById('threshold');\n        const durationInput = document.getElementById('duration');\n        const paddingInput = document.getElementById('padding');\n        const thresholdVal = document.getElementById('threshold-val');\n        const durationVal = document.getElementById('duration-val');\n        const paddingVal = document.getElementById('padding-val');\n        const logContainer = document.getElementById('log-container');\n        const loadingOverlay = document.getElementById('loading-overlay');\n        const loadingText = document.getElementById('loading-text');\n        const loadingPercent = document.getElementById('loading-percent');\n        const resultPanel = document.getElementById('result-panel');\n        const resultStats = document.getElementById('result-stats');\n        const downloadBtn = document.getElementById('download-btn');\n        const audioPreview = document.getElementById('audio-preview');\n        const presetExtremo = document.getElementById('preset-extremo');\n        const presetAgressivo = document.getElementById('preset-agressivo');\n        const presetNatural = document.getElementById('preset-natural');\n\n        let currentFile = null;\n        let currentJobId = localStorage.getItem('silencepro_last_job') || null;\n\n        function updateSliderUI() {\n            thresholdVal.textContent = `${thresholdInput.value} dB`;\n            durationVal.textContent = `${parseFloat(durationInput.value).toFixed(2)}s`;\n            paddingVal.textContent = `${parseFloat(paddingInput.value).toFixed(2)}s`;\n        }\n        thresholdInput.addEventListener('input', updateSliderUI);\n        durationInput.addEventListener('input', updateSliderUI);\n        paddingInput.addEventListener('input', updateSliderUI);\n\n        function resetButtons() {\n            [presetExtremo, presetAgressivo, presetNatural].forEach(btn => {\n                btn.className = 'py-2 px-1 bg-gray-800 rounded-lg text-xs font-bold transition-colors border border-gray-700 flex flex-col items-center justify-center text-center';\n            });\n        }\n        presetExtremo.addEventListener('click', () => {\n            resetButtons();\n            presetExtremo.className = 'py-2 px-1 bg-red-600 rounded-lg text-xs font-bold transition-colors border border-red-500 flex flex-col items-center justify-center text-center ring-2 ring-red-500 ring-offset-2 ring-offset-gray-900';\n            thresholdInput.value = -30;\n            durationInput.value = 0.04;\n            paddingInput.value = 0.02;\n            updateSliderUI();\n            log('Modo Extremo ativado.', 'info');\n        });\n        presetAgressivo.addEventListener('click', () => {\n            resetButtons();\n            presetAgressivo.className = 'py-2 px-1 bg-blue-600 rounded-lg text-xs font-bold transition-colors border border-blue-500 flex flex-col items-center justify-center text-center ring-2 ring-blue-500 ring-offset-2 ring-offset-gray-900';\n            thresholdInput.value = -30;\n            durationInput.value = 0.10;\n            paddingInput.value = 0.05;\n            updateSliderUI();\n            log('Modo Viral Max ativado.', 'info');\n        });\n        presetNatural.addEventListener('click', () => {\n            resetButtons();\n            presetNatural.className = 'py-2 px-1 bg-green-600 rounded-lg text-xs font-bold transition-colors border border-green-500 flex flex-col items-center justify-center text-center ring-2 ring-green-500 ring-offset-2 ring-offset-gray-900';\n            thresholdInput.value = -40;\n            durationInput.value = 0.30;\n            paddingInput.value = 0.05;\n            updateSliderUI();\n            log('Modo Natural (Podcast) ativado.', 'info');\n        });\n\n        function log(msg, type = 'info') {\n            const colors = { info: 'text-gray-300', success: 'text-green-400', error: 'text-red-400', warn: 'text-yellow-400' };\n            if (logContainer.innerHTML.includes('A aguardar')) logContainer.innerHTML = '';\n            const time = new Date().toLocaleTimeString('pt-PT', { hour12: false });\n            const line = document.createElement('div');\n            line.className = colors[type] || colors.info;\n            line.textContent = `[${time}] ${msg}`;\n            logContainer.appendChild(line);\n            logContainer.scrollTop = logContainer.scrollHeight;\n        }\n\n        function handleFile(file) {\n            if (!file) return;\n            const validVideoExts = ['.mp4', '.mov', '.webm', '.mkv'];\n            const ext = file.name.includes('.') ? file.name.substring(file.name.lastIndexOf('.')).toLowerCase() : '';\n            const isVideo = file.type.startsWith('video/') || validVideoExts.includes(ext);\n            if (!isVideo) {\n                log('Formato inválido. Esta versão aceita vídeo: MP4, MOV, WEBM ou MKV.', 'error');\n                return;\n            }\n            currentFile = file;\n            fileNameEl.textContent = file.name;\n            fileSizeEl.textContent = (file.size / (1024 * 1024)).toFixed(2) + ' MB';\n            fileInfoEl.classList.remove('hidden');\n            processBtn.disabled = false;\n            resultPanel.classList.add('hidden');\n            audioPreview.removeAttribute('src');\n            log(`Processando: ${file.name}`, 'info');\n        }\n\n        fileInput.addEventListener('click', (e) => { e.target.value = ''; });\n        fileInput.addEventListener('change', (e) => handleFile(e.target.files[0]));\n        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('border-blue-500', 'bg-gray-800/50'); });\n        dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('border-blue-500', 'bg-gray-800/50'); });\n        dropZone.addEventListener('drop', (e) => { e.preventDefault(); dropZone.classList.remove('border-blue-500', 'bg-gray-800/50'); handleFile(e.dataTransfer.files[0]); });\n\n        function setProgress(percent, text) {\n            const value = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));\n            loadingPercent.textContent = value + '%';\n            if (text) loadingText.textContent = text;\n        }\n\n        function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }\n\n        async function pollJob(jobId) {\n            currentJobId = jobId;\n            localStorage.setItem('silencepro_last_job', jobId);\n            while (true) {\n                const res = await fetch('/status/' + encodeURIComponent(jobId), { cache: 'no-store' });\n                const data = await res.json();\n                if (!res.ok || !data.ok) throw new Error(data.error || 'Não foi possível acompanhar o processamento.');\n                setProgress(data.percent || 0, data.stage || 'Processando...');\n\n                if (data.status === 'done') {\n                    log(`Silêncios detectados: ${data.silenceCount}`, 'success');\n                    log(`Cortes aplicados no vídeo: ${data.cutCount}`, 'success');\n                    log('Pronto! Arquivo final liberado para baixar.', 'success');\n                    downloadBtn.href = data.downloadUrl;\n                    downloadBtn.download = data.fileName || 'SilencePro_video_limpo.mp4';\n                    audioPreview.src = data.downloadUrl;\n                    resultStats.textContent = `Original: ${data.originalSeconds}s | Limpo: ${data.finalSeconds}s | Redução: ${data.reductionPercent}%`;\n                    resultPanel.classList.remove('hidden');\n                    localStorage.removeItem('silencepro_last_job');\n                    currentJobId = null;\n                    return data;\n                }\n                if (data.status === 'error') throw new Error(data.error || 'Erro ao processar vídeo.');\n                await sleep(1000);\n            }\n        }\n\n        processBtn.addEventListener('click', async () => {\n            if (!currentFile) return;\n            loadingOverlay.classList.remove('hidden');\n            loadingOverlay.classList.add('flex');\n            setProgress(0, 'Enviando arquivo...');\n            processBtn.disabled = true;\n            logContainer.innerHTML = '';\n            resultPanel.classList.add('hidden');\n\n            try {\n                log('Enviando vídeo para o motor...', 'info');\n                const form = new FormData();\n                form.append('video', currentFile);\n                form.append('threshold', thresholdInput.value);\n                form.append('duration', durationInput.value);\n                form.append('padding', paddingInput.value);\n\n                const res = await fetch('/process', { method: 'POST', body: form });\n                const contentType = res.headers.get('content-type') || '';\n                if (!contentType.includes('application/json')) {\n                    const text = await res.text();\n                    throw new Error('O backend não respondeu JSON. Use Web Service + Docker e faça Manual Deploy Clear build cache. Resposta: ' + text.slice(0, 120));\n                }\n                const data = await res.json();\n                if (!res.ok || !data.ok) throw new Error(data.error || 'Erro ao iniciar processamento.');\n\n                log('Arquivo recebido. Agora pode acompanhar a porcentagem.', 'info');\n                await pollJob(data.jobId);\n            } catch (error) {\n                console.error(error);\n                localStorage.removeItem('silencepro_last_job');\n                currentJobId = null;\n                log(`ERRO CRÍTICO: ${error.message}`, 'error');\n            } finally {\n                loadingOverlay.classList.add('hidden');\n                loadingOverlay.classList.remove('flex');\n                setProgress(0, 'Removendo silêncios...');\n                processBtn.disabled = false;\n            }\n        });\n\n\n        (async () => {\n            if (!currentJobId) return;\n            try {\n                loadingOverlay.classList.remove('hidden');\n                loadingOverlay.classList.add('flex');\n                processBtn.disabled = true;\n                log('Processamento anterior encontrado. Tentando recuperar...', 'info');\n                await pollJob(currentJobId);\n            } catch (e) {\n                localStorage.removeItem('silencepro_last_job');\n                currentJobId = null;\n            } finally {\n                loadingOverlay.classList.add('hidden');\n                loadingOverlay.classList.remove('flex');\n                processBtn.disabled = !currentFile;\n            }\n        })();\n    </script>\n</body>\n</html>\n";
+
+app.get('/health', (req, res) => res.json({ ok: true, service: 'Silence Pro MP4', ffmpeg: true }));
+app.get('/', (req, res) => res.type('html').send(INDEX_HTML));
+
+app.post('/process', upload.single('video'), async (req, res) => {
+  try {
+    if (!req.file) throw new Error('Nenhum vídeo foi enviado.');
+    const jobId = crypto.randomUUID();
+    const job = {
+      id: jobId,
+      status: 'queued',
+      percent: 1,
+      stage: 'Arquivo recebido. Iniciando...',
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    jobs.set(jobId, job);
+    const file = req.file;
+    const body = { ...req.body };
+    setImmediate(() => processJob(job, file, body));
+    res.json({ ok: true, jobId, statusUrl: '/status/' + encodeURIComponent(jobId), percent: 1, stage: job.stage });
+  } catch (err) {
+    const inputPath = req.file && req.file.path;
+    if (inputPath) fsp.unlink(inputPath).catch(() => {});
+    res.status(400).json({ ok: false, error: err.message || 'Erro ao iniciar processamento.' });
+  }
+});
+
+app.get('/status/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ ok: false, error: 'Processamento não encontrado ou expirado.' });
+  res.json(publicJob(job));
 });
 
 app.get('/download/:file', (req, res) => {
