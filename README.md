@@ -50,3 +50,7 @@ Render grátis tem limite de CPU, memória e tempo. Para vídeos muito grandes, 
 - Painel visual e textos principais mantidos como no arquivo original.
 - Processamento otimizado: detecção de silêncio em áudio mono 16 kHz e renderização por blocos preservados.
 - O resultado continua sendo MP4 único com áudio e vídeo juntos.
+
+
+## Correção anti-gagueira
+Esta versão desliga o corte em modo copy por padrão e usa corte preciso com trim/concat. Isso evita fala repetida, eco, efeito DJ ou gagueira nos pontos de corte, mantendo velocidade boa com preset ultrafast e CRF 20.

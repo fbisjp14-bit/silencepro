@@ -15,7 +15,9 @@ const OUTPUT_DIR = path.join(ROOT_TMP, 'outputs');
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 500);
 const FFMPEG_PRESET = process.env.FFMPEG_PRESET || 'ultrafast';
 const FFMPEG_CRF = process.env.FFMPEG_CRF || '23';
-const FAST_COPY_MODE = String(process.env.FAST_COPY_MODE || '1') !== '0';
+// Para remover o efeito de fala repetida/gaguejando, o corte rápido por cópia fica desligado por padrão.
+// Ele era veloz, mas em MP4 com keyframes longe do ponto de corte pode repetir trechos.
+const FAST_COPY_MODE = String(process.env.FAST_COPY_MODE || '0') === '1';
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -176,6 +178,37 @@ async function renderCopyConcat(inputPath, outputPath, cuts, duration) {
   }
 }
 
+function escapeFilterNumber(n) {
+  return Math.max(0, Number(n) || 0).toFixed(3);
+}
+
+async function renderPreciseTrimConcat(inputPath, outputPath, cuts, duration) {
+  const keep = buildKeepRanges(duration, cuts);
+  if (!keep.length) throw new Error('O corte ficou agressivo demais e removeria todo o vídeo.');
+
+  // Corte confiável: recorta vídeo e áudio pelos mesmos pontos e concatena com novos timestamps.
+  // Isso elimina o bug de “gago/DJ” causado por corte em modo copy perto de keyframes.
+  const parts = [];
+  const joins = [];
+  keep.forEach((r, i) => {
+    const start = escapeFilterNumber(r.start);
+    const end = escapeFilterNumber(r.end);
+    parts.push(`[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[v${i}]`);
+    parts.push(`[0:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[a${i}]`);
+    joins.push(`[v${i}][a${i}]`);
+  });
+  const filter = `${parts.join(';')};${joins.join('')}concat=n=${keep.length}:v=1:a=1[outv][outa]`;
+
+  await run('ffmpeg', [
+    '-hide_banner', '-y', '-nostdin', '-i', inputPath,
+    '-filter_complex', filter,
+    '-map', '[outv]', '-map', '[outa]',
+    '-c:v', 'libx264', '-preset', FFMPEG_PRESET, '-crf', FFMPEG_CRF,
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k',
+    '-movflags', '+faststart', '-threads', '0', outputPath
+  ]);
+}
+
 async function renderPreciseSelect(inputPath, outputPath, cuts) {
   const expr = buildDropExpression(cuts);
   const filter = `[0:v]select='${expr}',setpts=N/FRAME_RATE/TB[v];[0:a]aselect='${expr}',asetpts=N/SR/TB[a]`;
@@ -184,7 +217,7 @@ async function renderPreciseSelect(inputPath, outputPath, cuts) {
     '-filter_complex', filter,
     '-map', '[v]', '-map', '[a]',
     '-c:v', 'libx264', '-preset', FFMPEG_PRESET, '-crf', FFMPEG_CRF,
-    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k',
     '-movflags', '+faststart', '-threads', '0', outputPath
   ]);
 }
@@ -200,12 +233,13 @@ async function renderWithCuts(inputPath, outputPath, cuts, duration) {
     return { mode: 'copy-no-cuts' };
   }
 
+  // Modo copy só se for ativado manualmente por variável no Render.
+  // Por padrão fica desligado porque pode gerar repetição de fala em alguns MP4.
   if (FAST_COPY_MODE) {
     try {
       await renderCopyConcat(inputPath, outputPath, cuts, duration);
       const outInfo = await probe(outputPath).catch(() => null);
       const expected = finalSecondsAfterCuts(duration, cuts);
-      // Se o corte por cópia não reduziu o suficiente por causa de keyframes, usa o corte preciso.
       if (outInfo && outInfo.duration <= Math.min(duration - 0.15, expected + 0.75)) {
         return { mode: 'ultra-fast-copy' };
       }
@@ -215,8 +249,14 @@ async function renderWithCuts(inputPath, outputPath, cuts, duration) {
     }
   }
 
-  await renderPreciseSelect(inputPath, outputPath, cuts);
-  return { mode: 'precise-select' };
+  try {
+    await renderPreciseTrimConcat(inputPath, outputPath, cuts, duration);
+    return { mode: 'precise-trim-concat' };
+  } catch (e) {
+    fsp.unlink(outputPath).catch(() => {});
+    await renderPreciseSelect(inputPath, outputPath, cuts);
+    return { mode: 'precise-select-fallback' };
+  }
 }
 
 function cleanOldFiles() {
