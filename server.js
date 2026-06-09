@@ -321,6 +321,41 @@ const INDEX_HTML = "<!DOCTYPE html>\n<html lang=\"pt-PT\" class=\"dark\">\n<head
 
 const JOBS = new Map();
 const JOB_TTL_MS = 1000 * 60 * 60;
+const PROCESS_QUEUE = [];
+let queueRunning = false;
+
+function updateQueuePositions() {
+  PROCESS_QUEUE.forEach((job, index) => {
+    setJob(job.jobId, {
+      status: 'queued',
+      progress: 1,
+      eta: 'aguardando...',
+      message: index === 0 ? 'Aguardando o processamento atual terminar...' : 'Na fila de processamento...'
+    });
+  });
+}
+
+function enqueueVideoJob(job) {
+  PROCESS_QUEUE.push(job);
+  updateQueuePositions();
+  setImmediate(runNextQueuedJob);
+}
+
+async function runNextQueuedJob() {
+  if (queueRunning) return;
+  const job = PROCESS_QUEUE.shift();
+  updateQueuePositions();
+  if (!job) return;
+
+  queueRunning = true;
+  try {
+    await processVideoJob(job.jobId, job.inputPath, job.originalName, job.fileSize, job.threshold, job.minSilence, job.padding);
+  } finally {
+    queueRunning = false;
+    setImmediate(runNextQueuedJob);
+  }
+}
+
 
 function setJob(jobId, patch) {
   const old = JOBS.get(jobId) || {};
@@ -449,15 +484,23 @@ app.post('/process', upload.single('video'), async (req, res) => {
     JOBS.set(jobId, {
       ok: true,
       jobId,
-      status: 'processing',
+      status: 'queued',
       progress: 1,
-      eta: 'calculando...',
-      message: 'Removendo silêncios...',
+      eta: 'aguardando...',
+      message: 'Na fila de processamento...',
       createdAt: Date.now(),
       updatedAt: Date.now()
     });
     res.json({ ok: true, jobId, statusUrl: '/status/' + encodeURIComponent(jobId) });
-    setImmediate(() => processVideoJob(jobId, req.file.path, req.file.originalname, req.file.size, threshold, minSilence, padding));
+    enqueueVideoJob({
+      jobId,
+      inputPath: req.file.path,
+      originalName: req.file.originalname,
+      fileSize: req.file.size,
+      threshold,
+      minSilence,
+      padding
+    });
   } catch (err) {
     const friendly = friendlyServerError(err);
     res.status(400).json({ ok: false, code: friendly.code, error: friendly.error });
@@ -475,7 +518,19 @@ app.get('/download/:file', (req, res) => {
   const file = path.basename(req.params.file);
   const full = path.join(OUTPUT_DIR, file);
   if (!fs.existsSync(full)) return res.status(404).send('Arquivo ficou disponível por tempo limitado. Processe novamente.');
-  res.download(full, file);
+
+  res.download(full, file, (err) => {
+    if (err) {
+      console.error('Falha ao entregar download:', err.message);
+      return;
+    }
+
+    fs.unlink(full, (unlinkErr) => {
+      if (unlinkErr && unlinkErr.code !== 'ENOENT') {
+        console.error('Falha ao apagar arquivo baixado:', unlinkErr.message);
+      }
+    });
+  });
 });
 
 app.use((err, req, res, next) => {
