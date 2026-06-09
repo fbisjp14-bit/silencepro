@@ -1,10 +1,38 @@
-# Silence Pro MP4 Único para Render
+# Silence Pro MP4 único para Render - otimizado
 
-Versão feita para vídeo: aceita MP4, MOV, WEBM e MKV, detecta silêncio/respiração pelo áudio e corta as cenas do vídeo no mesmo ponto. O resultado é um MP4 único, com áudio e vídeo juntos. Esta versão mantém o painel original e usa processamento otimizado para ganhar velocidade sem perder qualidade visual.
+Esta versão mantém o painel visual do Silence Pro e processa vídeo no backend com FFmpeg.
 
-## Arquivos para substituir no GitHub
+## O que faz
 
-Substitua estes 4 arquivos no repositório:
+- Aceita MP4, MOV, WEBM e MKV.
+- Usa o áudio do vídeo para detectar silêncio.
+- Remove o silêncio/respiração baixa do áudio.
+- Remove as cenas do vídeo no mesmo ponto.
+- Entrega um MP4 único com áudio e vídeo juntos.
+- Não gera MP3 separado.
+
+## Como subir no Render
+
+Use como **Web Service**, não como Static Site.
+
+Configuração recomendada:
+
+- Environment: Docker
+- Branch: main
+- Root Directory: vazio, se os arquivos estiverem na raiz
+- Plan: Free
+
+Depois de substituir os arquivos no GitHub, faça:
+
+1. Render > seu serviço
+2. Manual Deploy
+3. Clear build cache & deploy
+
+Se aparecer erro dizendo que recebeu `<!DOCTYPE html>`, o site ainda está como Static Site ou o Render está usando cache/arquivos antigos.
+
+## Arquivos necessários
+
+Substitua na raiz do GitHub:
 
 ```text
 Dockerfile
@@ -13,30 +41,14 @@ server.js
 README.md
 ```
 
-## Como subir no Render grátis
+## Observação
 
-1. Crie ou abra seu repositório no GitHub.
-2. Apague os arquivos antigos que tiverem o mesmo nome.
-3. Envie estes 4 arquivos.
-4. No Render, crie um novo **Web Service**.
-5. Conecte o repositório.
-6. Escolha ambiente **Docker**.
-7. Clique em **Deploy**.
+Render grátis tem limite de CPU, memória e tempo. Para vídeos muito grandes, o processamento pode demorar ou falhar por limite do plano. Esta versão usa `ultrafast` para renderizar mais rápido.
 
-O Render vai instalar o FFmpeg dentro do Docker e iniciar o site automaticamente.
 
-## Como funciona
-
-- O usuário envia um vídeo.
-- O servidor usa FFmpeg para detectar silêncios pelo áudio.
-- As partes silenciosas são removidas.
-- O vídeo é cortado junto com o áudio.
-- O app entrega um MP4 final único.
-
-## Observações importantes
-
-- Esta versão não entrega MP3 separado.
-- Vídeos sem áudio não podem ser processados, porque os cortes são guiados pelo áudio.
-- No Render grátis, vídeos muito grandes podem falhar por limite de memória, disco ou tempo do plano gratuito. Para melhor estabilidade, use vídeos curtos/médios.
-- O modo padrão ao abrir é **Viral Max**.
-- Esta versão usa corte otimizado por seleção de trechos no FFmpeg, com fallback automático para o método antigo caso algum arquivo específico precise.
+## Ajuste desta versão
+- Painel visual e textos principais mantidos como no arquivo original.
+- Processamento ultra otimizado: detecção de silêncio em áudio mono 16 kHz e renderização por filtro único mais leve.
+- Quando não há cortes, usa cópia direta dos streams para preservar 100% da qualidade e acelerar o resultado.
+- Mantém fallback automático para o método antigo se algum vídeo tiver muitos cortes ou expressão grande demais.
+- O resultado continua sendo MP4 único com áudio e vídeo juntos.
