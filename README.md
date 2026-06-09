@@ -1,4 +1,4 @@
-# Silence Pro MP4 único para Render - otimizado
+# Silence Pro MP4 único para Render - corrigido
 
 Esta versão mantém o painel visual do Silence Pro e processa vídeo no backend com FFmpeg.
 
@@ -48,7 +48,5 @@ Render grátis tem limite de CPU, memória e tempo. Para vídeos muito grandes, 
 
 ## Ajuste desta versão
 - Painel visual e textos principais mantidos como no arquivo original.
-- Processamento ultra otimizado: detecção de silêncio em áudio mono 16 kHz e renderização por filtro único mais leve.
-- Quando não há cortes, usa cópia direta dos streams para preservar 100% da qualidade e acelerar o resultado.
-- Mantém fallback automático para o método antigo se algum vídeo tiver muitos cortes ou expressão grande demais.
+- Processamento otimizado: detecção de silêncio em áudio mono 16 kHz e renderização por blocos preservados.
 - O resultado continua sendo MP4 único com áudio e vídeo juntos.

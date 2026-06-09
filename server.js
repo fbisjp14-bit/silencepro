@@ -14,7 +14,8 @@ const UPLOAD_DIR = path.join(ROOT_TMP, 'uploads');
 const OUTPUT_DIR = path.join(ROOT_TMP, 'outputs');
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 500);
 const FFMPEG_PRESET = process.env.FFMPEG_PRESET || 'ultrafast';
-const FFMPEG_CRF = process.env.FFMPEG_CRF || '26';
+const FFMPEG_CRF = process.env.FFMPEG_CRF || '23';
+const FAST_COPY_MODE = String(process.env.FAST_COPY_MODE || '1') !== '0';
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -69,10 +70,15 @@ async function probe(inputPath) {
 }
 
 async function detectSilences(inputPath, thresholdDb, minSilenceSec) {
+  // Motor mais sensível para vídeo: no Render o usuário quer remover pausas/respirações,
+  // não apenas silêncio digital perfeito. Mantém o valor do painel, mas evita ficar fraco demais.
+  const effectiveThreshold = Math.max(Number(thresholdDb) || -30, -25);
+  const effectiveMinSilence = Math.max(0.03, Math.min(3, Number(minSilenceSec) || 0.10));
+
   const { stderr } = await run('ffmpeg', [
     '-hide_banner', '-nostdin', '-i', inputPath,
-    '-vn', '-ac', '1', '-ar', '16000',
-    '-af', 'silencedetect=n=' + thresholdDb + 'dB:d=' + minSilenceSec,
+    '-vn', '-sn', '-dn', '-ac', '1', '-ar', '16000',
+    '-af', 'highpass=f=80,lowpass=f=9000,silencedetect=n=' + effectiveThreshold + 'dB:d=' + effectiveMinSilence,
     '-f', 'null', '-'
   ]);
   const silences = [];
@@ -86,7 +92,7 @@ async function detectSilences(inputPath, thresholdDb, minSilenceSec) {
       currentStart = null;
     }
   }
-  return { silences, openSilenceStart: currentStart };
+  return { silences, openSilenceStart: currentStart, effectiveThreshold, effectiveMinSilence };
 }
 
 function buildCutRanges(duration, silences, openSilenceStart, paddingSec) {
@@ -95,16 +101,21 @@ function buildCutRanges(duration, silences, openSilenceStart, paddingSec) {
   if (openSilenceStart !== null && openSilenceStart !== undefined) ranges.push({ start: openSilenceStart, end: max });
 
   const cuts = [];
+  const margin = Math.max(0, Math.min(0.25, Number(paddingSec) || 0));
   for (const s of ranges) {
-    const start = Math.max(0, Math.min(max, Number(s.start) + paddingSec));
-    const end = Math.max(0, Math.min(max, Number(s.end) - paddingSec));
-    if (end - start >= 0.025) cuts.push({ start, end });
+    // CORREÇÃO IMPORTANTE:
+    // antes o padding encolhia o corte (start + padding / end - padding).
+    // Em pausas curtas isso virava corte de 0s: detectava silêncio, mas não removia nada.
+    // Agora a margem expande um pouco o corte para tirar pausa/respiração de verdade.
+    const start = Math.max(0, Math.min(max, Number(s.start) - margin));
+    const end = Math.max(0, Math.min(max, Number(s.end) + margin));
+    if (end - start >= 0.035) cuts.push({ start, end });
   }
   cuts.sort((a, b) => a.start - b.start);
 
   const merged = [];
   for (const c of cuts) {
-    if (!merged.length || c.start > merged[merged.length - 1].end + 0.02) merged.push({ ...c });
+    if (!merged.length || c.start > merged[merged.length - 1].end + 0.015) merged.push({ ...c });
     else merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, c.end);
   }
   return merged;
@@ -130,107 +141,82 @@ function buildKeepRanges(duration, cuts) {
   return keep.filter(r => r.end - r.start >= 0.025);
 }
 
-function escapeFilterNumber(n) {
-  return Number(n).toFixed(3);
+function quoteConcatPath(filePath) {
+  return String(filePath).replace(/'/g, "'\\''");
 }
 
-function buildCutExpression(cuts) {
-  // Uma única expressão de seleção é mais leve do que criar centenas de blocos trim/concat.
-  // O resultado do corte continua seguindo exatamente os mesmos pontos detectados.
-  return cuts
-    .map(c => `between(t\\,${escapeFilterNumber(c.start)}\\,${escapeFilterNumber(c.end)})`)
-    .join('+');
+function buildDropExpression(cuts) {
+  if (!cuts.length) return '1';
+  const parts = cuts.map(c => `between(t,${Math.max(0, c.start).toFixed(3)},${Math.max(0, c.end).toFixed(3)})`);
+  return `not(${parts.join('+')})`;
 }
 
-async function tryStreamCopy(inputPath, outputPath) {
-  // Quando não existe silêncio para cortar, não recompacta o vídeo: copia os streams.
-  // Isso preserva 100% da qualidade original e termina muito mais rápido.
-  try {
-    await run('ffmpeg', [
-      '-hide_banner', '-y', '-nostdin', '-i', inputPath,
-      '-map', '0:v:0', '-map', '0:a:0',
-      '-c', 'copy', '-movflags', '+faststart', outputPath
-    ]);
-    return true;
-  } catch (_) {
-    if (outputPath) await fsp.unlink(outputPath).catch(() => {});
-    return false;
-  }
-}
-
-async function renderWithTrimConcat(inputPath, outputPath, cuts, duration) {
+async function renderCopyConcat(inputPath, outputPath, cuts, duration) {
   const keep = buildKeepRanges(duration, cuts);
   if (!keep.length) throw new Error('O corte ficou agressivo demais e removeria todo o vídeo.');
 
-  const scriptPath = path.join(ROOT_TMP, crypto.randomUUID() + '-filter-fallback.txt');
-  let filter = '';
-  const parts = [];
-  keep.forEach((r, i) => {
-    const st = Math.max(0, r.start).toFixed(3);
-    const en = Math.max(0, r.end).toFixed(3);
-    filter += `[0:v]trim=start=${st}:end=${en},setpts=PTS-STARTPTS[v${i}];\n`;
-    filter += `[0:a]atrim=start=${st}:end=${en},asetpts=PTS-STARTPTS[a${i}];\n`;
-    parts.push(`[v${i}][a${i}]`);
-  });
-  filter += `${parts.join('')}concat=n=${keep.length}:v=1:a=1[v][a]`;
-
-  await fsp.writeFile(scriptPath, filter, 'utf8');
+  const listPath = path.join(ROOT_TMP, crypto.randomUUID() + '-concat.ffconcat');
+  let list = 'ffconcat version 1.0\n';
+  for (const r of keep) {
+    list += `file '${quoteConcatPath(inputPath)}'\n`;
+    list += `inpoint ${Math.max(0, r.start).toFixed(3)}\n`;
+    list += `outpoint ${Math.max(0, r.end).toFixed(3)}\n`;
+  }
+  await fsp.writeFile(listPath, list, 'utf8');
   try {
     await run('ffmpeg', [
-      '-hide_banner', '-y', '-nostdin', '-i', inputPath,
-      '-filter_complex_script', scriptPath,
-      '-map', '[v]', '-map', '[a]',
-      '-c:v', 'libx264', '-preset', FFMPEG_PRESET, '-crf', FFMPEG_CRF,
-      '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
-      '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-threads', '0', outputPath
+      '-hide_banner', '-y', '-nostdin',
+      '-f', 'concat', '-safe', '0', '-i', listPath,
+      '-map', '0:v:0', '-map', '0:a:0?',
+      '-c', 'copy', '-avoid_negative_ts', 'make_zero', '-fflags', '+genpts',
+      '-movflags', '+faststart', outputPath
     ]);
   } finally {
-    fsp.unlink(scriptPath).catch(() => {});
+    fsp.unlink(listPath).catch(() => {});
   }
+}
+
+async function renderPreciseSelect(inputPath, outputPath, cuts) {
+  const expr = buildDropExpression(cuts);
+  const filter = `[0:v]select='${expr}',setpts=N/FRAME_RATE/TB[v];[0:a]aselect='${expr}',asetpts=N/SR/TB[a]`;
+  await run('ffmpeg', [
+    '-hide_banner', '-y', '-nostdin', '-i', inputPath,
+    '-filter_complex', filter,
+    '-map', '[v]', '-map', '[a]',
+    '-c:v', 'libx264', '-preset', FFMPEG_PRESET, '-crf', FFMPEG_CRF,
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
+    '-movflags', '+faststart', '-threads', '0', outputPath
+  ]);
 }
 
 async function renderWithCuts(inputPath, outputPath, cuts, duration) {
   if (!cuts.length) {
-    const copied = await tryStreamCopy(inputPath, outputPath);
-    if (copied) return;
-
+    // Sem corte real: cópia instantânea, sem perda de qualidade.
     await run('ffmpeg', [
       '-hide_banner', '-y', '-nostdin', '-i', inputPath,
-      '-map', '0:v:0', '-map', '0:a:0',
-      '-c:v', 'libx264', '-preset', FFMPEG_PRESET, '-crf', FFMPEG_CRF,
-      '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
-      '-movflags', '+faststart', '-threads', '0', outputPath
+      '-map', '0:v:0', '-map', '0:a:0?',
+      '-c', 'copy', '-movflags', '+faststart', outputPath
     ]);
-    return;
+    return { mode: 'copy-no-cuts' };
   }
 
-  const keep = buildKeepRanges(duration, cuts);
-  if (!keep.length) throw new Error('O corte ficou agressivo demais e removeria todo o vídeo.');
-
-  const expr = buildCutExpression(cuts);
-  const scriptPath = path.join(ROOT_TMP, crypto.randomUUID() + '-filter.txt');
-  const fastFilter = [
-    `[0:v]select='not(${expr})',setpts=N/FRAME_RATE/TB[v]`,
-    `[0:a]aselect='not(${expr})',asetpts=N/SR/TB[a]`
-  ].join(';');
-
-  await fsp.writeFile(scriptPath, fastFilter, 'utf8');
-  try {
-    await run('ffmpeg', [
-      '-hide_banner', '-y', '-nostdin', '-i', inputPath,
-      '-filter_complex_script', scriptPath,
-      '-map', '[v]', '-map', '[a]',
-      '-c:v', 'libx264', '-preset', FFMPEG_PRESET, '-crf', FFMPEG_CRF,
-      '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
-      '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-threads', '0', outputPath
-    ]);
-  } catch (err) {
-    // Fallback de segurança: se o FFmpeg rejeitar uma expressão muito grande, usa o método antigo.
-    if (outputPath) await fsp.unlink(outputPath).catch(() => {});
-    await renderWithTrimConcat(inputPath, outputPath, cuts, duration);
-  } finally {
-    fsp.unlink(scriptPath).catch(() => {});
+  if (FAST_COPY_MODE) {
+    try {
+      await renderCopyConcat(inputPath, outputPath, cuts, duration);
+      const outInfo = await probe(outputPath).catch(() => null);
+      const expected = finalSecondsAfterCuts(duration, cuts);
+      // Se o corte por cópia não reduziu o suficiente por causa de keyframes, usa o corte preciso.
+      if (outInfo && outInfo.duration <= Math.min(duration - 0.15, expected + 0.75)) {
+        return { mode: 'ultra-fast-copy' };
+      }
+      fsp.unlink(outputPath).catch(() => {});
+    } catch (e) {
+      fsp.unlink(outputPath).catch(() => {});
+    }
   }
+
+  await renderPreciseSelect(inputPath, outputPath, cuts);
+  return { mode: 'precise-select' };
 }
 
 function cleanOldFiles() {
@@ -275,7 +261,7 @@ app.post('/process', upload.single('video'), async (req, res) => {
 
     const outputName = 'SilencePro_' + safeBaseName(req.file.originalname) + '_MP4_limpo_' + crypto.randomUUID().slice(0, 8) + '.mp4';
     outputPath = path.join(OUTPUT_DIR, outputName);
-    await renderWithCuts(inputPath, outputPath, cuts, info.duration);
+    const renderResult = await renderWithCuts(inputPath, outputPath, cuts, info.duration);
 
     const reductionPercent = Math.max(0, Math.round((1 - finalSeconds / info.duration) * 100));
     res.json({
@@ -286,7 +272,8 @@ app.post('/process', upload.single('video'), async (req, res) => {
       finalSeconds: finalSeconds.toFixed(1),
       reductionPercent,
       silenceCount: detected.silences.length + (detected.openSilenceStart !== null ? 1 : 0),
-      cutCount: cuts.length
+      cutCount: cuts.length,
+      renderMode: renderResult && renderResult.mode ? renderResult.mode : 'ok'
     });
   } catch (err) {
     if (outputPath) fsp.unlink(outputPath).catch(() => {});
