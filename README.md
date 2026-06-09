@@ -1,4 +1,4 @@
-# Silence Pro MP4 único para Render — Smart HQ Final
+# Silence Pro MP4 único para Render — Smart HQ Video Garantido
 
 Versão corrigida para Render com painel original preservado.
 
@@ -34,3 +34,8 @@ Se aparecer JSON com `ok:true`, o backend está certo.
 ## Importante
 
 No Render grátis, vídeos muito grandes podem demorar ou falhar por limite de CPU/RAM. Para testar, use primeiro vídeos curtos.
+
+
+## Correção desta versão
+
+Esta versão verifica o arquivo final com ffprobe antes de liberar o download. Se o modo rápido gerar MP4 sem trilha de vídeo em algum codec, o servidor recria automaticamente em modo HQ compatível para entregar vídeo + áudio juntos.
