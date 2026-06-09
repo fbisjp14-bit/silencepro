@@ -7,15 +7,15 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY package.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+RUN npm install --omit=dev
 
 COPY server.js README.md ./
 
 ENV NODE_ENV=production
 ENV PORT=10000
 ENV FFMPEG_PRESET=ultrafast
-ENV FFMPEG_CRF=20
+ENV FFMPEG_CRF=23
 
 EXPOSE 10000
 
-CMD ["node", "server.js"]
+CMD ["npm", "start"]
