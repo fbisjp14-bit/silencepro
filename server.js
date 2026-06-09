@@ -212,7 +212,7 @@ async function makeCleanMp3(input, output, segments) {
 app.get('/', (req, res) => res.type('html').send(HTML));
 app.use('/outputs', express.static(OUT));
 
-app.post('/api/process', upload.single('file'), async (req, res) => {
+async function handleProcess(req, res) {
   const id = uuidv4();
   const jobDir = path.join(WORK, id);
   await fsp.mkdir(jobDir, { recursive: true });
@@ -277,7 +277,15 @@ app.post('/api/process', upload.single('file'), async (req, res) => {
   } finally {
     setTimeout(() => fsp.rm(jobDir, { recursive: true, force: true }).catch(() => {}), 1000 * 60 * 5);
   }
-});
+}
+
+app.get('/api/health', (req, res) => res.json({ ok: true, service: 'Silence Pro', api: true }));
+app.post('/api/process', upload.single('file'), handleProcess);
+app.post('/process', upload.single('file'), handleProcess);
+app.post('/api/process-video', upload.single('file'), handleProcess);
+
+// Qualquer rota de API inexistente responde JSON para evitar erro Unexpected token '<'.
+app.use('/api', (req, res) => res.status(404).json({ ok:false, error:'Rota de API não encontrada. Confirme que o projeto está como Web Service Docker no Render.' }));
 
 setInterval(async () => {
   try {
@@ -327,6 +335,6 @@ function updateSliderUI(){thresholdVal.textContent=thresholdInput.value+' dB';du
 function preset(th,dur,pad){thresholdInput.value=th;durationInput.value=dur;paddingInput.value=pad;updateSliderUI()}
 document.getElementById('preset-extremo').onclick=()=>preset(-25,0.06,0.02);document.getElementById('preset-agressivo').onclick=()=>preset(-30,0.10,0.05);document.getElementById('preset-natural').onclick=()=>preset(-40,0.30,0.10);
 fileInput.addEventListener('change',e=>{currentFile=e.target.files[0];if(!currentFile)return;fileInfoEl.classList.remove('hidden');fileNameEl.textContent=currentFile.name;fileSizeEl.textContent=(currentFile.size/1024/1024).toFixed(2)+' MB';processBtn.disabled=false;resultPanel.classList.add('hidden');logContainer.innerHTML='';log('Vídeo carregado: '+currentFile.name,'ok')});
-processBtn.addEventListener('click',async()=>{if(!currentFile)return;loadingOverlay.classList.remove('hidden');loadingOverlay.classList.add('flex');processBtn.disabled=true;resultPanel.classList.add('hidden');log('A enviar vídeo para o servidor FFmpeg...','warn');const fd=new FormData();fd.append('file',currentFile);fd.append('threshold',thresholdInput.value);fd.append('minSilence',durationInput.value);fd.append('padding',paddingInput.value);try{const r=await fetch('/api/process',{method:'POST',body:fd});const data=await r.json();if(!data.ok)throw new Error(data.error||'Erro ao processar.');log('Corte concluído. Cenas preservadas: '+data.scenes,'ok');log('Threshold usado: '+data.thresholdUsed+' dB','ok');const pct=Math.round((data.reduction||0)*100);resultStats.textContent='Original: '+data.original.toFixed(1)+'s | Final: '+data.final.toFixed(1)+'s | Redução: '+pct+'% | Cenas: '+data.scenes;resultMessage.textContent=data.message||'';downloadBtn.href=data.mp4;videoPreview.src=data.mp4;resultPanel.classList.remove('hidden')}catch(err){log('ERRO CRÍTICO: '+err.message,'err');alert('Erro: '+err.message)}finally{loadingOverlay.classList.add('hidden');loadingOverlay.classList.remove('flex');processBtn.disabled=false}});
+processBtn.addEventListener('click',async()=>{if(!currentFile)return;loadingOverlay.classList.remove('hidden');loadingOverlay.classList.add('flex');processBtn.disabled=true;resultPanel.classList.add('hidden');log('A enviar vídeo para o servidor FFmpeg...','warn');const fd=new FormData();fd.append('file',currentFile);fd.append('threshold',thresholdInput.value);fd.append('minSilence',durationInput.value);fd.append('padding',paddingInput.value);try{const r=await fetch('/api/process',{method:'POST',body:fd});const text=await r.text();let data;try{data=JSON.parse(text)}catch(parseErr){const preview=text.slice(0,120).replace(/\s+/g,' ');throw new Error('O backend não respondeu JSON. Isso quase sempre significa que você subiu como Static Site ou o Render está usando arquivos antigos. Resposta recebida: '+preview)}if(!r.ok || !data.ok)throw new Error((data&&data.error)||'Erro ao processar.');log('Corte concluído. Cenas preservadas: '+data.scenes,'ok');log('Threshold usado: '+data.thresholdUsed+' dB','ok');const pct=Math.round((data.reduction||0)*100);resultStats.textContent='Original: '+data.original.toFixed(1)+'s | Final: '+data.final.toFixed(1)+'s | Redução: '+pct+'% | Cenas: '+data.scenes;resultMessage.textContent=data.message||'';downloadBtn.href=data.mp4;videoPreview.src=data.mp4;resultPanel.classList.remove('hidden')}catch(err){log('ERRO CRÍTICO: '+err.message,'err');alert('Erro: '+err.message)}finally{loadingOverlay.classList.add('hidden');loadingOverlay.classList.remove('flex');processBtn.disabled=false}});
 updateSliderUI();
 </script></body></html>`;
