@@ -1,29 +1,42 @@
-# Silence Pro MP4 único para Render — Lógica Original do Áudio
+# Silence Pro MP4 Único para Render
 
-Versão corrigida mantendo o painel original e os presets originais.
+Versão feita para vídeo: aceita MP4, MOV, WEBM e MKV, detecta silêncio/respiração pelo áudio e corta as cenas do vídeo no mesmo ponto. O resultado é um MP4 único, com áudio e vídeo juntos. Esta versão mantém o painel original e usa processamento otimizado para ganhar velocidade sem perder qualidade visual.
 
-## Substitua estes 4 arquivos no GitHub
+## Arquivos para substituir no GitHub
 
-- Dockerfile
-- package.json
-- server.js
-- README.md
+Substitua estes 4 arquivos no repositório:
 
-## O que foi corrigido
+```text
+Dockerfile
+package.json
+server.js
+README.md
+```
 
-- Mantém os valores padrão do painel original.
-- Não muda automaticamente threshold, duração ou margem.
-- Usa a mesma lógica do áudio original: RMS em janelas de 10ms.
-- O áudio vira mapa de corte e o vídeo segue os mesmos cortes.
-- Entrega MP4 único final com vídeo + áudio juntos.
-- Verifica o arquivo final antes de liberar.
+## Como subir no Render grátis
 
-## Render
+1. Crie ou abra seu repositório no GitHub.
+2. Apague os arquivos antigos que tiverem o mesmo nome.
+3. Envie estes 4 arquivos.
+4. No Render, crie um novo **Web Service**.
+5. Conecte o repositório.
+6. Escolha ambiente **Docker**.
+7. Clique em **Deploy**.
 
-Use Web Service + Docker. Depois faça:
+O Render vai instalar o FFmpeg dentro do Docker e iniciar o site automaticamente.
 
-Manual Deploy → Clear build cache & deploy
+## Como funciona
 
-Teste:
+- O usuário envia um vídeo.
+- O servidor usa FFmpeg para detectar silêncios pelo áudio.
+- As partes silenciosas são removidas.
+- O vídeo é cortado junto com o áudio.
+- O app entrega um MP4 final único.
 
-/health
+## Observações importantes
+
+- Esta versão não entrega MP3 separado.
+- Vídeos sem áudio não podem ser processados, porque os cortes são guiados pelo áudio.
+- No Render grátis, vídeos muito grandes podem falhar por limite de memória, disco ou tempo do plano gratuito. Para melhor estabilidade, use vídeos curtos/médios.
+- O modo padrão ao abrir é **Viral Max**.
+- Esta versão usa corte otimizado por seleção de trechos no FFmpeg, com fallback automático para o método antigo caso algum arquivo específico precise.
