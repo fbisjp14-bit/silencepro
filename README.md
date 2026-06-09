@@ -1,6 +1,6 @@
-# Silence Pro MP4 único para Render — Smart HQ Vídeo Certo
+# Silence Pro MP4 único para Render — Lógica Original do Áudio
 
-Versão corrigida para manter o painel original e entregar MP4 final com vídeo + áudio juntos.
+Versão corrigida mantendo o painel original e os presets originais.
 
 ## Substitua estes 4 arquivos no GitHub
 
@@ -9,28 +9,21 @@ Versão corrigida para manter o painel original e entregar MP4 final com vídeo 
 - server.js
 - README.md
 
-## Configuração no Render
+## O que foi corrigido
 
-Use **Web Service + Docker**. Depois faça:
+- Mantém os valores padrão do painel original.
+- Não muda automaticamente threshold, duração ou margem.
+- Usa a mesma lógica do áudio original: RMS em janelas de 10ms.
+- O áudio vira mapa de corte e o vídeo segue os mesmos cortes.
+- Entrega MP4 único final com vídeo + áudio juntos.
+- Verifica o arquivo final antes de liberar.
 
-**Manual Deploy → Clear build cache & deploy**
+## Render
 
-Teste o servidor em:
+Use Web Service + Docker. Depois faça:
 
-`/health`
+Manual Deploy → Clear build cache & deploy
 
-Se aparecer JSON com `ok:true` e `Silence Pro MP4 Smart HQ Video Certo`, o backend está certo.
+Teste:
 
-## O que faz
-
-- Recebe vídeo MP4, MOV, WEBM ou MKV.
-- Detecta silêncio/respiração pelo áudio com FFmpeg.
-- Corta as cenas do vídeo seguindo o áudio.
-- Entrega um MP4 único final.
-- Verifica se o resultado tem vídeo + áudio antes de liberar.
-- Painel original preservado; ajuste apenas no bloco final para mostrar MP4/BAIXAR MP4 e prévia em vídeo.
-- Tenta preservar qualidade original quando possível; se não der, usa HQ rápido.
-
-## Importante
-
-No Render grátis, vídeos grandes podem demorar ou falhar por limite de CPU/RAM. Para testar, use primeiro vídeos curtos.
+/health
