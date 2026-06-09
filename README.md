@@ -1,12 +1,11 @@
-# Silence Pro - Render/Railway
+# Silence Pro - Render
 
-Versão com MP3 limpo + MP4 cortado usando o mesmo padrão de corte do removedor de MP3.
+Web Service com Node.js + FFmpeg para remover silêncios de vídeo MP4 e entregar um MP4 final único.
 
-Arquivos para enviar no GitHub:
-
+Arquivos para subir no GitHub:
 - Dockerfile
 - package.json
 - server.js
 - README.md
 
-Depois no Render: Manual Deploy -> Deploy latest commit.
+No Render: New -> Web Service -> Environment Docker -> Free -> Deploy.
