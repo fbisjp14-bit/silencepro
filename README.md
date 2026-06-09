@@ -1,44 +1,36 @@
-# Silence Pro MP4 único para Render — Smart HQ
+# Silence Pro MP4 único para Render — Smart HQ Final
 
-Versão para Render com foco em **qualidade + velocidade**.
+Versão corrigida para Render com painel original preservado.
+
+## Substitua estes 4 arquivos no GitHub
+
+- Dockerfile
+- package.json
+- server.js
+- README.md
+
+## Configuração no Render
+
+Use **Web Service + Docker**. Depois faça:
+
+**Manual Deploy → Clear build cache & deploy**
+
+Teste o servidor em:
+
+`/health`
+
+Se aparecer JSON com `ok:true`, o backend está certo.
 
 ## O que faz
 
-- Aceita vídeo.
-- Usa o áudio como guia dos cortes.
-- Remove silêncio/respiração baixa.
-- Remove as cenas do vídeo no mesmo ponto dos cortes do áudio.
-- Entrega um único MP4 final com áudio e vídeo juntos.
-- Não entrega MP3 separado.
-- Mantém o painel visual do Silence Pro.
+- Recebe vídeo MP4, MOV, WEBM ou MKV.
+- Detecta silêncio/respiração pelo áudio com FFmpeg.
+- Corta as cenas do vídeo seguindo o áudio.
+- Entrega um MP4 único final.
+- Mantém painel original do Silence Pro sem trocar os textos principais.
+- Usa no-cache para evitar o problema de o navegador carregar arquivos antigos.
+- Tenta preservar qualidade original quando possível; se não der, usa HQ rápido.
 
-## Motor Smart HQ
+## Importante
 
-1. Primeiro tenta o modo rápido sem recomprimir o vídeo (`stream copy`), preservando a qualidade original quando o codec permite.
-2. Se o vídeo não permitir corte por cópia, cai automaticamente no modo compatível com qualidade alta.
-3. O fallback usa `libx264`, `preset ultrafast` e `CRF 17`, priorizando velocidade sem destruir a qualidade visual.
-
-## Deploy no Render
-
-Substitua na raiz do GitHub:
-
-```text
-Dockerfile
-package.json
-server.js
-README.md
-```
-
-Depois faça:
-
-```text
-Manual Deploy -> Clear build cache & deploy
-```
-
-Teste o backend:
-
-```text
-/health
-```
-
-Se retornar JSON com `ok: true`, está correto.
+No Render grátis, vídeos muito grandes podem demorar ou falhar por limite de CPU/RAM. Para testar, use primeiro vídeos curtos.
