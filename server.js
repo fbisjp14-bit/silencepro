@@ -14,7 +14,11 @@ const UPLOAD_DIR = path.join(ROOT_TMP, 'uploads');
 const OUTPUT_DIR = path.join(ROOT_TMP, 'outputs');
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 500);
 const FFMPEG_PRESET = process.env.FFMPEG_PRESET || 'ultrafast';
-const FFMPEG_CRF = process.env.FFMPEG_CRF || '23';
+// CRF maior = arquivo mais leve. 25 mantém boa qualidade visual e reduz bastante o peso.
+const FFMPEG_CRF = process.env.FFMPEG_CRF || '25';
+const OPTIMIZE_OUTPUT = String(process.env.OPTIMIZE_OUTPUT || '1') !== '0';
+const TARGET_MAX_WIDTH = Number(process.env.TARGET_MAX_WIDTH || 1080);
+const FFMPEG_AUDIO_BITRATE = process.env.FFMPEG_AUDIO_BITRATE || '128k';
 const JOB_TTL_MS = Number(process.env.JOB_TTL_MS || 1000 * 60 * 60 * 3);
 const MAX_PROCESS_MS = Number(process.env.MAX_PROCESS_MS || 1000 * 60 * 20);
 
@@ -446,6 +450,10 @@ async function renderPreciseSelect(inputPath, outputPath, cuts, duration) {
   }
   for (let i = 0; i < keep.length; i++) filter += `[v${i}][a${i}]`;
   filter += `concat=n=${keep.length}:v=1:a=1[vcat][acat];`;
+  if (OPTIMIZE_OUTPUT) {
+    // Otimização estilo plataformas: não aumenta resolução, só reduz vídeos acima do limite.
+    filter += `[vcat]scale=w='min(${TARGET_MAX_WIDTH},iw)':h=-2:flags=bicubic[vout];`;
+  }
   filter += `[acat]aresample=async=1:first_pts=0,alimiter=limit=0.98[a]`;
 
   await fsp.writeFile(filterPath, filter, 'utf8');
@@ -453,9 +461,9 @@ async function renderPreciseSelect(inputPath, outputPath, cuts, duration) {
     await run('ffmpeg', [
       '-hide_banner', '-y', '-nostdin', '-i', inputPath,
       '-filter_complex_script', filterPath,
-      '-map', '[vcat]', '-map', '[a]',
+      '-map', OPTIMIZE_OUTPUT ? '[vout]' : '[vcat]', '-map', '[a]',
       '-c:v', 'libx264', '-preset', FFMPEG_PRESET, '-crf', FFMPEG_CRF,
-      '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000',
+      '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', FFMPEG_AUDIO_BITRATE, '-ar', '48000',
       '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-threads', '0', outputPath
     ]);
   } finally {
@@ -463,8 +471,28 @@ async function renderPreciseSelect(inputPath, outputPath, cuts, duration) {
   }
 }
 
+
+async function renderOptimizedNoCuts(inputPath, outputPath) {
+  // Quando não encontra cortes, ainda assim entrega um MP4 otimizado e mais leve.
+  const vf = OPTIMIZE_OUTPUT ? `scale=w='min(${TARGET_MAX_WIDTH},iw)':h=-2:flags=bicubic` : 'null';
+  await run('ffmpeg', [
+    '-hide_banner', '-y', '-nostdin', '-i', inputPath,
+    '-map', '0:v:0', '-map', '0:a:0?',
+    '-vf', vf,
+    '-c:v', 'libx264', '-preset', FFMPEG_PRESET, '-crf', FFMPEG_CRF,
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', FFMPEG_AUDIO_BITRATE, '-ar', '48000',
+    '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-threads', '0', outputPath
+  ]);
+}
+
 async function renderWithCuts(inputPath, outputPath, cuts, duration) {
   if (!cuts.length) {
+    if (OPTIMIZE_OUTPUT) {
+      await renderOptimizedNoCuts(inputPath, outputPath);
+      return { mode: 'optimized-no-cuts' };
+    }
+
     // Sem corte real: cópia instantânea, sem perda de qualidade.
     await run('ffmpeg', [
       '-hide_banner', '-y', '-nostdin', '-i', inputPath,
@@ -687,6 +715,7 @@ app.post('/process', upload.single('video'), async (req, res) => {
 
         logJob(job, `Silêncios detectados: ${detected.silences.length + (detected.openSilenceStart !== null ? 1 : 0)}`, 'success');
         logJob(job, `Cortes aplicados no vídeo: ${cuts.length}`, 'success');
+        if (OPTIMIZE_OUTPUT) logJob(job, 'Otimizando o MP4 para ficar mais leve, estilo TikTok/YouTube...', 'info');
 
         updateJob(job, { progress: 70, message: 'Renderizando vídeo...' });
         const outputName = 'SilencePro_' + safeBaseName(originalName) + '_MP4_limpo_' + crypto.randomUUID().slice(0, 8) + '.mp4';
@@ -708,7 +737,9 @@ app.post('/process', upload.single('video'), async (req, res) => {
           reductionPercent,
           silenceCount: detected.silences.length + (detected.openSilenceStart !== null ? 1 : 0),
           cutCount: cuts.length,
-          renderMode: renderResult && renderResult.mode ? renderResult.mode : 'ok'
+          renderMode: renderResult && renderResult.mode ? renderResult.mode : 'ok',
+          optimized: Boolean(OPTIMIZE_OUTPUT),
+          outputSizeMB: fs.existsSync(outputPath) ? (fs.statSync(outputPath).size / (1024 * 1024)).toFixed(2) : null
         };
       } catch (err) {
         if (outputPath) fsp.unlink(outputPath).catch(() => {});

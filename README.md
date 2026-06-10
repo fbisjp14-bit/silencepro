@@ -94,3 +94,19 @@ ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.co
 O `ACCESS_PASSWORD` ativa uma tela de senha antes de usar o motor. Sem essa variável, o site continua aberto, mas mantém CORS, Origin/Referer, headers e rate limit.
 
 Importante: a aparência do front-end ainda pode ser copiada pelo navegador. A proteção reforçada protege principalmente o motor/backend do Render.
+
+
+## Otimização automática de vídeo
+
+Esta versão já renderiza o MP4 final mais leve, no mesmo processo do corte, sem criar uma segunda renderização.
+
+Variáveis opcionais no Render:
+
+```env
+OPTIMIZE_OUTPUT=1
+TARGET_MAX_WIDTH=1080
+FFMPEG_CRF=25
+FFMPEG_AUDIO_BITRATE=128k
+```
+
+Observação: não existe compressão com zero perda absoluta em MP4. O objetivo aqui é manter qualidade visual boa e reduzir bastante o peso, como plataformas fazem.
