@@ -50,3 +50,47 @@ Render grátis tem limite de CPU, memória e tempo. Para vídeos muito grandes, 
 - Painel visual e textos principais mantidos como no arquivo original.
 - Processamento otimizado: detecção de silêncio em áudio mono 16 kHz e renderização por blocos preservados.
 - O resultado continua sendo MP4 único com áudio e vídeo juntos.
+
+
+## Anti-clonagem no Render
+
+Esta versão bloqueia uso do motor fora dos domínios autorizados.
+
+No Render, em Environment, configure:
+
+```env
+ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.com
+RATE_LIMIT_MAX=12
+RATE_LIMIT_WINDOW_MS=60000
+```
+
+Se usar domínio próprio:
+
+```env
+ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.com,https://seudominio.com
+```
+
+Observação: qualquer pessoa ainda pode copiar a aparência do site pelo navegador. Esta proteção impede que uma cópia use o backend/motor do Silence Pro.
+
+
+## Proteção reforçada perto de 90%
+
+Para ativar a proteção extra no Render, configure em Environment:
+
+```env
+ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.com
+ACCESS_PASSWORD=coloque-uma-senha-forte-aqui
+SESSION_SECRET=coloque-uma-chave-grande-aleatoria-aqui
+RATE_LIMIT_MAX=8
+RATE_LIMIT_WINDOW_MS=60000
+```
+
+Se usar domínio próprio:
+
+```env
+ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.com,https://seudominio.com
+```
+
+O `ACCESS_PASSWORD` ativa uma tela de senha antes de usar o motor. Sem essa variável, o site continua aberto, mas mantém CORS, Origin/Referer, headers e rate limit.
+
+Importante: a aparência do front-end ainda pode ser copiada pelo navegador. A proteção reforçada protege principalmente o motor/backend do Render.
