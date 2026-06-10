@@ -59,7 +59,7 @@ Esta versão bloqueia uso do motor fora dos domínios autorizados.
 No Render, em Environment, configure:
 
 ```env
-ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.com
+ALLOWED_ORIGINS=https://silencepro.pages.dev
 RATE_LIMIT_MAX=12
 RATE_LIMIT_WINDOW_MS=60000
 ```
@@ -67,7 +67,7 @@ RATE_LIMIT_WINDOW_MS=60000
 Se usar domínio próprio:
 
 ```env
-ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.com,https://seudominio.com
+ALLOWED_ORIGINS=https://silencepro.pages.dev,https://seudominio.com
 ```
 
 Observação: qualquer pessoa ainda pode copiar a aparência do site pelo navegador. Esta proteção impede que uma cópia use o backend/motor do Silence Pro.
@@ -78,7 +78,7 @@ Observação: qualquer pessoa ainda pode copiar a aparência do site pelo navega
 Para ativar a proteção extra no Render, configure em Environment:
 
 ```env
-ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.com
+ALLOWED_ORIGINS=https://silencepro.pages.dev
 ACCESS_PASSWORD=coloque-uma-senha-forte-aqui
 SESSION_SECRET=coloque-uma-chave-grande-aleatoria-aqui
 RATE_LIMIT_MAX=8
@@ -88,32 +88,9 @@ RATE_LIMIT_WINDOW_MS=60000
 Se usar domínio próprio:
 
 ```env
-ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.com,https://seudominio.com
+ALLOWED_ORIGINS=https://silencepro.pages.dev,https://seudominio.com
 ```
 
 O `ACCESS_PASSWORD` ativa uma tela de senha antes de usar o motor. Sem essa variável, o site continua aberto, mas mantém CORS, Origin/Referer, headers e rate limit.
 
 Importante: a aparência do front-end ainda pode ser copiada pelo navegador. A proteção reforçada protege principalmente o motor/backend do Render.
-
-
-## Ajuste desta versão
-
-A fila foi removida. O sistema mantém as mesmas rotas `/process` e `/status`, mas o processamento inicia imediatamente após o upload.
-
-
-## Ajuste de velocidade desta versão
-
-O modo turbo automático foi ativado por padrão:
-
-```env
-FAST_COPY_MODE=1
-FFMPEG_THREADS=2
-```
-
-Ele tenta uma renderização muito mais rápida primeiro. Se o corte rápido não reduzir corretamente, o sistema volta para o modo preciso anti-gago/anti-chiado.
-
-Para voltar ao modo mais pesado e preciso, configure no Render:
-
-```env
-FAST_COPY_MODE=0
-```
