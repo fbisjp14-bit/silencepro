@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: silencepro-render-video
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: MAX_UPLOAD_MB
+        value: 500
+      - key: FFMPEG_PRESET
+        value: veryfast
+      - key: FFMPEG_CRF
+        value: 23
+      - key: FFMPEG_THREADS
+        value: 2
