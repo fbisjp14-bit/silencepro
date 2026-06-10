@@ -99,3 +99,21 @@ Importante: a aparência do front-end ainda pode ser copiada pelo navegador. A p
 ## Ajuste desta versão
 
 A fila foi removida. O sistema mantém as mesmas rotas `/process` e `/status`, mas o processamento inicia imediatamente após o upload.
+
+
+## Ajuste de velocidade desta versão
+
+O modo turbo automático foi ativado por padrão:
+
+```env
+FAST_COPY_MODE=1
+FFMPEG_THREADS=2
+```
+
+Ele tenta uma renderização muito mais rápida primeiro. Se o corte rápido não reduzir corretamente, o sistema volta para o modo preciso anti-gago/anti-chiado.
+
+Para voltar ao modo mais pesado e preciso, configure no Render:
+
+```env
+FAST_COPY_MODE=0
+```
