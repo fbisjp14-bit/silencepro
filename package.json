@@ -1,18 +1,17 @@
 {
-  "name": "silencepro-render-video",
-  "version": "1.0.0",
-  "description": "Silence Pro by Leinad para Render com remoção de silêncio em áudio e vídeo.",
+  "name": "silence-pro-mp4-unico-render",
+  "version": "2.0.0",
+  "description": "Silence Pro by Leinad - corta cenas do vídeo seguindo os silêncios do áudio e gera MP4 único.",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node server.js"
   },
-  "dependencies": {
-    "@ffmpeg-installer/ffmpeg": "^1.1.0",
-    "@ffprobe-installer/ffprobe": "^2.1.2",
-    "express": "^4.18.2",
-    "multer": "^1.4.5-lts.1"
-  },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1"
   }
 }
