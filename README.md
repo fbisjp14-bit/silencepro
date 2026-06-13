@@ -134,3 +134,14 @@ Esta versão corrige a lentidão do Ultra Turbo.
 No modo Relâmpago, o sistema tenta cortar por cópia (`-c copy`) sem reencodar o vídeo inteiro. Isso é muito mais rápido no Render e mantém a qualidade original.
 
 Observação: por cortar sem reencode, alguns cortes podem ser um pouco menos precisos dependendo dos keyframes do vídeo. Se precisar de corte mais perfeito, use Rápido ou Qualidade Alta.
+
+## Relâmpago Seguro
+
+Corrige a repetição/gagueira de áudio do modo Relâmpago.
+
+Agora o sistema:
+- mantém o vídeo em `copy` para preservar velocidade e qualidade;
+- recodifica apenas o áudio em AAC para limpar timestamps;
+- usa `aresample=async=1:first_pts=0` para reduzir repetição/gagueira.
+
+Esse modo continua muito mais rápido que reencodar o vídeo inteiro.
