@@ -59,7 +59,7 @@ Esta versão bloqueia uso do motor fora dos domínios autorizados.
 No Render, em Environment, configure:
 
 ```env
-ALLOWED_ORIGINS=https://silencepro.pages.dev
+ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.com
 RATE_LIMIT_MAX=12
 RATE_LIMIT_WINDOW_MS=60000
 ```
@@ -67,7 +67,7 @@ RATE_LIMIT_WINDOW_MS=60000
 Se usar domínio próprio:
 
 ```env
-ALLOWED_ORIGINS=https://silencepro.pages.dev,https://seudominio.com
+ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.com,https://seudominio.com
 ```
 
 Observação: qualquer pessoa ainda pode copiar a aparência do site pelo navegador. Esta proteção impede que uma cópia use o backend/motor do Silence Pro.
@@ -78,7 +78,7 @@ Observação: qualquer pessoa ainda pode copiar a aparência do site pelo navega
 Para ativar a proteção extra no Render, configure em Environment:
 
 ```env
-ALLOWED_ORIGINS=https://silencepro.pages.dev
+ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.com
 ACCESS_PASSWORD=coloque-uma-senha-forte-aqui
 SESSION_SECRET=coloque-uma-chave-grande-aleatoria-aqui
 RATE_LIMIT_MAX=8
@@ -88,9 +88,29 @@ RATE_LIMIT_WINDOW_MS=60000
 Se usar domínio próprio:
 
 ```env
-ALLOWED_ORIGINS=https://silencepro.pages.dev,https://seudominio.com
+ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.com,https://seudominio.com
 ```
 
 O `ACCESS_PASSWORD` ativa uma tela de senha antes de usar o motor. Sem essa variável, o site continua aberto, mas mantém CORS, Origin/Referer, headers e rate limit.
 
 Importante: a aparência do front-end ainda pode ser copiada pelo navegador. A proteção reforçada protege principalmente o motor/backend do Render.
+
+## Versão sem fila
+
+Esta versão voltou para a estrutura direta anterior:
+upload -> processar -> retornar resultado.
+
+Foi removido o carregamento de fila/status que mostrava mensagens como:
+"Na fila: 1 vídeo(s) na frente".
+
+As configurações dos cortes foram mantidas.
+
+## Modo Turbo para vídeos longos
+
+Esta versão adiciona uma opção de velocidade de entrega:
+
+- Turbo: força 30 FPS, reduz resolução pelo maior lado para 960px, CRF 30 e áudio AAC 128k. É a opção mais rápida para Render.
+- Rápido: força 30 FPS, maior lado 1280px, CRF 26 e áudio AAC 160k.
+- Qualidade Alta: mantém resolução original e usa a qualidade padrão.
+
+As configurações de corte foram mantidas. O modo Turbo mexe na renderização/saída para acelerar vídeos longos.
