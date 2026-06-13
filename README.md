@@ -126,3 +126,11 @@ Esta versão muda o modo Turbo para um caminho mais rápido no Render:
 - áudio AAC 96k.
 
 Use Ultra Turbo quando o objetivo for entregar rápido. Para melhor imagem, use Rápido ou Qualidade Alta.
+
+## Modo Relâmpago
+
+Esta versão corrige a lentidão do Ultra Turbo.
+
+No modo Relâmpago, o sistema tenta cortar por cópia (`-c copy`) sem reencodar o vídeo inteiro. Isso é muito mais rápido no Render e mantém a qualidade original.
+
+Observação: por cortar sem reencode, alguns cortes podem ser um pouco menos precisos dependendo dos keyframes do vídeo. Se precisar de corte mais perfeito, use Rápido ou Qualidade Alta.
