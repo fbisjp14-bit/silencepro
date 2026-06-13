@@ -462,6 +462,7 @@ async function renderPreciseSelect(inputPath, outputPath, cuts, duration, output
   const keep = buildKeepRanges(duration, cuts);
   if (!keep.length) throw new Error('O corte ficou agressivo demais e removeria todo o vídeo.');
 
+  const renderSettings = getRenderSettings(outputMode);
   const filterPath = path.join(ROOT_TMP, crypto.randomUUID() + '-anti-chiado.filter');
   const AUDIO_FADE = Math.max(0.006, Math.min(0.018, Number(process.env.AUDIO_FADE_SEC || 0.012)));
   let filter = '';
