@@ -145,3 +145,16 @@ Agora o sistema:
 - usa `aresample=async=1:first_pts=0` para reduzir repetição/gagueira.
 
 Esse modo continua muito mais rápido que reencodar o vídeo inteiro.
+
+## Relâmpago Keyframe
+
+Este modo mantém a velocidade do `copy`, mas evita o bug de cena/áudio repetindo.
+
+Como funciona:
+- detecta os keyframes do vídeo;
+- ajusta os cortes para keyframes seguros;
+- copia o vídeo sem reencodar;
+- recodifica apenas o áudio para corrigir timestamps.
+
+Vantagem: muito rápido no Render e mais seguro que copy bruto.
+Limite: como só corta em keyframes, pode sobrar um pedacinho de silêncio em alguns pontos.
