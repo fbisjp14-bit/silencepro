@@ -114,3 +114,15 @@ Esta versão adiciona uma opção de velocidade de entrega:
 - Qualidade Alta: mantém resolução original e usa a qualidade padrão.
 
 As configurações de corte foram mantidas. O modo Turbo mexe na renderização/saída para acelerar vídeos longos.
+
+## Ultra Turbo corrigido
+
+Esta versão muda o modo Turbo para um caminho mais rápido no Render:
+
+- usa filtro select/aselect em vez de muitos trim/concat;
+- força 30 FPS;
+- reduz maior lado para 720px;
+- usa CRF 32;
+- áudio AAC 96k.
+
+Use Ultra Turbo quando o objetivo for entregar rápido. Para melhor imagem, use Rápido ou Qualidade Alta.
