@@ -146,15 +146,13 @@ Agora o sistema:
 
 Esse modo continua muito mais rápido que reencodar o vídeo inteiro.
 
-## Relâmpago Keyframe
+## Relâmpago Sem Repetir
 
-Este modo mantém a velocidade do `copy`, mas evita o bug de cena/áudio repetindo.
+Esta versão mantém a velocidade do modo Relâmpago, mas corrige a principal causa de repetição:
 
-Como funciona:
-- detecta os keyframes do vídeo;
-- ajusta os cortes para keyframes seguros;
-- copia o vídeo sem reencodar;
+- lê os keyframes do vídeo com ffprobe;
+- ajusta os cortes para começar em keyframes seguros;
+- mantém o vídeo em copy para continuar rápido;
 - recodifica apenas o áudio para corrigir timestamps.
 
-Vantagem: muito rápido no Render e mais seguro que copy bruto.
-Limite: como só corta em keyframes, pode sobrar um pedacinho de silêncio em alguns pontos.
+Observação: para evitar repetição, alguns cortes podem ficar um pouco menos precisos, porque o modo rápido respeita keyframes. Para corte perfeito, use Rápido/Qualidade Alta.
