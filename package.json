@@ -1,7 +1,7 @@
 {
   "name": "silence-pro-mp4-unico-render",
-  "version": "2.0.0",
-  "description": "Silence Pro by Leinad - corta cenas do vídeo seguindo os silêncios do áudio e gera MP4 único.",
+  "version": "1.0.0",
+  "description": "Silence Pro by Leinad - remove silêncios do áudio e corta as cenas do vídeo, gerando MP4 único para Render.",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

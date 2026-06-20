@@ -6,15 +6,13 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY package.json ./
+COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 
-COPY server.js README.md ./
+COPY server.js ./
 
 ENV NODE_ENV=production
 ENV PORT=10000
-ENV FFMPEG_PRESET=ultrafast
-ENV FFMPEG_CRF=23
 
 EXPOSE 10000
 
