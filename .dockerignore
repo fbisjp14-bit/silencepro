@@ -1,16 +1,5 @@
 node_modules
-package-lock.json
 npm-debug.log
 .git
 .gitignore
-.env
-.DS_Store
 *.zip
-uploads
-outputs
-tmp
-*.mp4
-*.mp3
-*.mov
-*.mkv
-*.webm
