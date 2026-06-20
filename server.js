@@ -299,8 +299,6 @@ setInterval(cleanOldFiles, 1000 * 60 * 15).unref();
 
 
 const JOBS = new Map();
-const PROCESS_QUEUE = [];
-let activeJob = null;
 
 function nowTime() {
   return new Date().toLocaleTimeString('pt-PT', { hour12: false });
@@ -310,9 +308,9 @@ function createJob() {
   const id = crypto.randomUUID();
   const job = {
     id,
-    status: 'queued',
+    status: 'processing',
     progress: 1,
-    message: 'Na fila...',
+    message: 'Preparando processamento...',
     logs: [],
     result: null,
     error: null,
@@ -334,48 +332,24 @@ function logJob(job, msg, type = 'info') {
   job.updatedAt = Date.now();
 }
 
-function queuePosition(jobId) {
-  const idx = PROCESS_QUEUE.findIndex(item => item.job.id === jobId);
-  return idx < 0 ? 0 : idx + 1;
-}
-
-function enqueueJob(job, task) {
-  PROCESS_QUEUE.push({ job, task });
-  const pos = queuePosition(job.id);
-  updateJob(job, {
-    status: 'queued',
-    progress: 5,
-    message: pos > 1 ? `Na fila: ${pos - 1} vídeo(s) na frente` : 'Aguardando processamento...'
+function processJobNow(job, task) {
+  setImmediate(async () => {
+    try {
+      updateJob(job, { status: 'processing', progress: 10, message: 'Iniciando processamento...' });
+      logJob(job, 'A ligar o motor de áudio...', 'info');
+      const result = await task(job);
+      updateJob(job, { status: 'done', progress: 100, message: 'Processamento concluído!', result });
+      logJob(job, 'Pronto! Processamento concluído.', 'success');
+    } catch (err) {
+      updateJob(job, {
+        status: 'error',
+        progress: 100,
+        message: 'Erro no processamento',
+        error: err.message || 'Erro ao processar vídeo.'
+      });
+      logJob(job, 'ERRO: ' + (err.message || 'Erro ao processar vídeo.'), 'error');
+    }
   });
-  drainQueue();
-}
-
-async function drainQueue() {
-  if (activeJob) return;
-  const item = PROCESS_QUEUE.shift();
-  if (!item) return;
-
-  const { job, task } = item;
-  activeJob = job.id;
-
-  try {
-    updateJob(job, { status: 'processing', progress: 10, message: 'Iniciando processamento...' });
-    logJob(job, 'A ligar o motor de áudio...', 'info');
-    const result = await task(job);
-    updateJob(job, { status: 'done', progress: 100, message: 'Processamento concluído!', result });
-    logJob(job, 'Pronto! Processamento concluído.', 'success');
-  } catch (err) {
-    updateJob(job, {
-      status: 'error',
-      progress: 100,
-      message: 'Erro no processamento',
-      error: err.message || 'Erro ao processar vídeo.'
-    });
-    logJob(job, 'ERRO: ' + (err.message || 'Erro ao processar vídeo.'), 'error');
-  } finally {
-    activeJob = null;
-    setImmediate(drainQueue);
-  }
 }
 
 setInterval(() => {
@@ -403,9 +377,9 @@ app.post('/process', upload.single('video'), async (req, res) => {
     const originalName = req.file.originalname;
 
     const job = createJob();
-    logJob(job, 'Upload recebido. Aguardando processamento...', 'success');
+    logJob(job, 'Upload recebido. Processando no servidor...', 'success');
 
-    enqueueJob(job, async (job) => {
+    processJobNow(job, async (job) => {
       let outputPath = null;
 
       try {
@@ -473,13 +447,12 @@ app.get('/status/:jobId', (req, res) => {
     });
   }
 
-  const pos = queuePosition(job.id);
   res.json({
     ok: true,
     id: job.id,
     status: job.status,
     progress: job.progress,
-    message: job.status === 'queued' && pos > 1 ? `Na fila: ${pos - 1} vídeo(s) na frente` : job.message,
+    message: job.message,
     logs: job.logs,
     result: job.result,
     error: job.error

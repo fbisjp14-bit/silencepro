@@ -47,6 +47,7 @@ Render grátis tem limite de CPU, memória e tempo. Para vídeos muito grandes, 
 
 
 ## Ajuste desta versão
+- Fila de espera removida: o processamento começa direto após o upload.
 - Painel visual e textos principais mantidos como no arquivo original.
 - Processamento otimizado: detecção de silêncio em áudio mono 16 kHz e renderização por blocos preservados.
 - O resultado continua sendo MP4 único com áudio e vídeo juntos.
