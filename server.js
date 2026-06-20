@@ -8,32 +8,6 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const app = express();
-app.set('trust proxy', 1);
-
-function corsMiddleware(req, res, next) {
-  const origin = req.headers.origin;
-  const configured = (process.env.ALLOWED_ORIGINS || '*')
-    .split(',')
-    .map(item => item.trim())
-    .filter(Boolean);
-
-  if (origin && (configured.includes('*') || configured.includes(origin))) {
-    res.setHeader('Access-Control-Allow-Origin', configured.includes('*') ? '*' : origin);
-    res.setHeader('Vary', 'Origin');
-  } else if (!origin && configured.includes('*')) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  }
-
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
-  res.setHeader('Access-Control-Max-Age', '86400');
-
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
-  next();
-}
-
-app.use(corsMiddleware);
-
 const PORT = process.env.PORT || 10000;
 const ROOT_TMP = path.join(os.tmpdir(), 'silencepro-render');
 const UPLOAD_DIR = path.join(ROOT_TMP, 'uploads');
@@ -501,8 +475,6 @@ function page() {
 </html>`;
 }
 
-app.get('/health', (req, res) => res.json({ ok: true, service: 'Silence Pro API', status: 'online' }));
-
 app.get('/', (req, res) => res.type('html').send(page()));
 
 app.post('/process', upload.single('video'), async (req, res) => {
@@ -540,7 +512,7 @@ app.post('/process', upload.single('video'), async (req, res) => {
     res.json({
       ok: true,
       fileName: outputName,
-      downloadUrl: req.protocol + '://' + req.get('host') + '/download/' + encodeURIComponent(outputName),
+      downloadUrl: '/download/' + encodeURIComponent(outputName),
       originalSeconds: info.duration.toFixed(1),
       finalSeconds: finalSeconds.toFixed(1),
       reductionPercent,

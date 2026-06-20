@@ -1,51 +1,41 @@
-# Silence Pro API para usar com Lovable
+# Silence Pro MP4 Único para Render
 
-Esta versão mantém o motor pesado no Render:
+Versão feita para vídeo: aceita MP4, MOV, WEBM e MKV, detecta silêncio/respiração pelo áudio e corta as cenas do vídeo no mesmo ponto. O resultado é um MP4 único, com áudio e vídeo juntos.
 
-- Node/Express
-- FFmpeg instalado via Docker
-- Upload de vídeo
-- Corte de silêncio guiado pelo áudio
-- Retorno de MP4 final
-- CORS liberado para o frontend do Lovable
-- `downloadUrl` absoluto para funcionar fora do domínio do Render
-- `/health` para testar se a API está online
+## Arquivos para substituir no GitHub
 
-## Variáveis no Render
+Substitua estes 4 arquivos no repositório:
 
-Opcional, mas recomendado:
-
-```txt
-MAX_UPLOAD_MB=700
-ALLOWED_ORIGINS=https://SEU-PROJETO.lovable.app,https://SEU-DOMINIO.com
+```text
+Dockerfile
+package.json
+server.js
+README.md
 ```
 
-Se deixar `ALLOWED_ORIGINS` sem configurar, a API permite qualquer origem (`*`). Para testar é mais fácil, mas para produção é melhor colocar só o domínio do Lovable.
+## Como subir no Render grátis
 
-## Rotas
+1. Crie ou abra seu repositório no GitHub.
+2. Apague os arquivos antigos que tiverem o mesmo nome.
+3. Envie estes 4 arquivos.
+4. No Render, crie um novo **Web Service**.
+5. Conecte o repositório.
+6. Escolha ambiente **Docker**.
+7. Clique em **Deploy**.
 
-### `GET /health`
-Confirma que a API está online.
+O Render vai instalar o FFmpeg dentro do Docker e iniciar o site automaticamente.
 
-### `POST /process`
-Recebe `multipart/form-data`:
+## Como funciona
 
-- `video`: arquivo MP4/MOV/WEBM/MKV
-- `threshold`: volume de corte em dB, exemplo `-30`
-- `duration`: silêncio mínimo, exemplo `0.10`
-- `padding`: margem natural, exemplo `0.05`
+- O usuário envia um vídeo.
+- O servidor usa FFmpeg para detectar silêncios pelo áudio.
+- As partes silenciosas são removidas.
+- O vídeo é cortado junto com o áudio.
+- O app entrega um MP4 final único.
 
-Retorna JSON:
+## Observações importantes
 
-```json
-{
-  "ok": true,
-  "fileName": "SilencePro_video_MP4_limpo_abcd1234.mp4",
-  "downloadUrl": "https://seu-render.onrender.com/download/arquivo.mp4",
-  "originalSeconds": "30.0",
-  "finalSeconds": "22.5",
-  "reductionPercent": 25,
-  "silenceCount": 12,
-  "segmentCount": 13
-}
-```
+- Esta versão não entrega MP3 separado.
+- Vídeos sem áudio não podem ser processados, porque os cortes são guiados pelo áudio.
+- No Render grátis, vídeos muito grandes podem falhar por limite de memória, disco ou tempo do plano gratuito. Para melhor estabilidade, use vídeos curtos/médios.
+- O modo padrão ao abrir é **Viral Max**.
