@@ -94,3 +94,38 @@ ALLOWED_ORIGINS=https://silencepro.pages.dev,https://silencepro-sqo1.onrender.co
 O `ACCESS_PASSWORD` ativa uma tela de senha antes de usar o motor. Sem essa variável, o site continua aberto, mas mantém CORS, Origin/Referer, headers e rate limit.
 
 Importante: a aparência do front-end ainda pode ser copiada pelo navegador. A proteção reforçada protege principalmente o motor/backend do Render.
+
+
+## Teste de velocidade 1080p
+
+Esta versão limita a saída em no máximo 1080p:
+
+- 4K/2K descem para 1080p;
+- 1080p fica 1080p;
+- 720p ou menor fica como está;
+- não faz upscale.
+
+No Render, você pode mudar o limite com:
+
+```env
+MAX_OUTPUT_HEIGHT=1080
+```
+
+Para desativar na prática e manter resoluções maiores, use um número maior, por exemplo:
+
+```env
+MAX_OUTPUT_HEIGHT=2160
+```
+
+
+## Correção de fila travada
+
+Esta versão corrige quando fica preso em "Na fila: 1 vídeo(s) na frente".
+
+Variável opcional no Render:
+
+```env
+MAX_QUEUE_WAIT_MS=300000
+```
+
+Também aparece o botão "Cancelar fila" quando existir processamento na frente.
