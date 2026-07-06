@@ -1,6 +1,6 @@
-# Silence Pro MP4 único para Render - corrigido
+# Silence Pro MP4 único para Render - modo partes
 
-Esta versão mantém o painel visual do Silence Pro e processa vídeo no backend com FFmpeg.
+Esta versão mantém a estrutura visual original do Silence Pro, continua processando no backend com FFmpeg e agora adiciona um modo novo para testar vídeos divididos em partes.
 
 ## O que faz
 
@@ -9,7 +9,36 @@ Esta versão mantém o painel visual do Silence Pro e processa vídeo no backend
 - Remove o silêncio/respiração baixa do áudio.
 - Remove as cenas do vídeo no mesmo ponto.
 - Entrega um MP4 único com áudio e vídeo juntos.
+- Mantém o modo antigo: **Vídeo único**.
+- Adiciona o modo novo: **Partes**.
+- No modo Partes, você seleciona vários vídeos curtos, o sistema processa um por vez e depois junta tudo em um MP4 final para download.
 - Não gera MP3 separado.
+
+## Como usar o modo Partes
+
+1. Corte o vídeo grande em partes menores antes de enviar.
+2. Renomeie os arquivos em ordem, por exemplo:
+
+```text
+parte-01.mp4
+parte-02.mp4
+parte-03.mp4
+parte-04.mp4
+```
+
+3. Abra o Silence Pro.
+4. Clique em **Partes**.
+5. Selecione todos os arquivos.
+6. Clique em **Processar Partes e Unir**.
+7. O sistema vai processar uma parte por vez e, no final, gerar um MP4 final unido.
+
+## Tamanho recomendado das partes
+
+Para Render grátis ou PC fraco:
+
+- Vídeo leve: 5 a 10 minutos por parte.
+- Vídeo pesado: 3 a 5 minutos por parte.
+- Vídeo 4K: melhor converter para 1080p antes ou dividir em partes menores.
 
 ## Como subir no Render
 
@@ -37,16 +66,19 @@ Substitua na raiz do GitHub:
 ```text
 Dockerfile
 package.json
+package-lock.json
 server.js
 README.md
 ```
 
-## Observação
+## Observação importante
 
-Render grátis tem limite de CPU, memória e tempo. Para vídeos muito grandes, o processamento pode demorar ou falhar por limite do plano. Esta versão usa `ultrafast` para renderizar mais rápido.
-
+O modo Partes reduz a chance de erro porque cada upload/render fica menor. Ele não garante que o tempo total será muito menor, porque ainda precisa processar cada parte e unir tudo no final.
 
 ## Ajuste desta versão
+
 - Painel visual e textos principais mantidos como no arquivo original.
-- Processamento otimizado: detecção de silêncio em áudio mono 16 kHz e renderização por blocos preservados.
-- O resultado continua sendo MP4 único com áudio e vídeo juntos.
+- Novo seletor: **Vídeo único** ou **Partes**.
+- Backend com nova rota `/merge` para unir os MP4 processados.
+- O sistema continua bloqueando processamento paralelo para evitar travamento no Render grátis.
+- Resultado final continua sendo MP4 único com áudio e vídeo juntos.
